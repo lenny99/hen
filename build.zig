@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const chicken = buildChicken(b);
-    b.getInstallStep().dependOn(chicken);
+    const chicken = LibChicken.build(b);
+    b.getInstallStep().dependOn(chicken.step);
 
     const mod = b.addModule("hen", .{
         .root_source_file = b.path("src/root.zig"),
@@ -13,9 +13,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    mod.addIncludePath(b.path("vendor-out/chicken-core/include"));
-    mod.addObjectFile(b.path("vendor-out/chicken-core/lib/libchicken-static.a"));
-    mod.linkSystemLibrary("m", .{ .use_pkg_config = .no });
+    (&chicken).link(mod);
 
     const exe = b.addExecutable(.{
         .name = "hen",
@@ -59,28 +57,44 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 }
 
-fn buildChicken(b: *std.Build) *std.Build.Step {
-    const prefix = b.pathFromRoot("vendor-out/chicken-core");
-    const path = b.path("vendors/chicken-core");
+const LibChicken = struct {
+    b: *std.Build,
+    step: *std.Build.Step,
+    prefix: []u8,
 
-    const configure = b.addSystemCommand(&.{ "./configure", "--prefix", prefix, "--chicken", "$(which chicken)/.." });
-    {
-        configure.setCwd(path);
+    fn build(b: *std.Build) @This() {
+        const prefix = b.pathFromRoot("vendor-out/chicken-core");
+        const path = b.path("vendors/chicken-core");
+
+        const configure = b.addSystemCommand(&.{ "./configure", "--prefix", prefix, "--chicken", "$(which chicken)/.." });
+        {
+            configure.setCwd(path);
+        }
+
+        const make = b.addSystemCommand(&.{ "make", "-j" });
+        {
+            make.setCwd(path);
+            make.step.dependOn(&configure.step);
+        }
+
+        const install = b.addSystemCommand(&.{ "make", "install" });
+        {
+            install.setCwd(path);
+            install.step.dependOn(&make.step);
+        }
+
+        const chicken = b.step("chicken", "build chicken");
+        {
+            chicken.dependOn(&install.step);
+        }
+
+        return @This(){ .b = b, .step = chicken, .prefix = prefix };
     }
 
-    const make = b.addSystemCommand(&.{ "make", "-j" });
-    {
-        make.setCwd(path);
-        make.step.dependOn(&configure.step);
+    fn link(self: *const @This(), mod: *std.Build.Module) void {
+        const b = self.b;
+        mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "include" }) });
+        mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "lib/libchicken-static.a" }) });
+        mod.linkSystemLibrary("m", .{ .use_pkg_config = .no });
     }
-
-    const install = b.addSystemCommand(&.{ "make", "install" });
-    {
-        install.setCwd(path);
-        install.step.dependOn(&make.step);
-    }
-
-    const chicken = b.step("chicken", "build chicken");
-    chicken.dependOn(&install.step);
-    return chicken;
-}
+};
