@@ -8,17 +8,18 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(chicken_build.step);
 
     const chicken_module = b.addModule("chicken", .{
-        .root_source_file = b.path("src/chicken.zig"),
+        .root_source_file = b.path("src/chicken/root.zig"),
         .target = target,
         .link_libc = true,
     });
     (&chicken_build).link(chicken_module);
 
-    const mod = b.addModule("hen", .{
-        .root_source_file = b.path("src/root.zig"),
+    const uuid = b.dependency("uuid", .{ .target = target });
+    const agent_module = b.addModule("agent", .{
+        .root_source_file = b.path("src/agent/root.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "chicken", .module = chicken_module },
+            .{ .name = "uuid", .module = uuid.module("uuid") },
         },
     });
 
@@ -29,7 +30,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "hen", .module = mod },
+                .{ .name = "agent", .module = agent_module },
             },
         }),
     });
@@ -53,11 +54,11 @@ pub fn build(b: *std.Build) void {
 
     const run_chicken_tests = b.addRunArtifact(chicken_tests);
 
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    const agent_tests = b.addTest(.{
+        .root_module = agent_module,
     });
 
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    const run_agent_tests = b.addRunArtifact(agent_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
@@ -67,7 +68,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_chicken_tests.step);
-    test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
 

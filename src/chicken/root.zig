@@ -218,7 +218,7 @@ test "reject embedded NUL bytes" {
     );
     try std.testing.expectError(
         error.InvalidCString,
-        interpreter.load(allocator, "src/testdata/load.scm\x00ignored"),
+        interpreter.load(allocator, "src/chicken/testdata/load.scm\x00ignored"),
     );
 }
 
@@ -227,6 +227,6 @@ test "load a Scheme file through the Zig API" {
     const interpreter = try Interpreter.init(.{});
     var output: [64]u8 = undefined;
 
-    try interpreter.load(allocator, "src/testdata/load.scm");
+    try interpreter.load(allocator, "src/chicken/testdata/load.scm");
     try std.testing.expectEqualStrings("99", try interpreter.eval(allocator, "loaded-through-zig", &output));
 }
