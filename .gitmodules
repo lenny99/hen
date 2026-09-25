@@ -1,0 +1,3 @@
+[submodule "vendors/chicken-core"]
+	path = vendors/chicken-core
+	url = https://code.call-cc.org/chicken-core
