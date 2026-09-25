@@ -23,6 +23,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const agent_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/agent/session.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "agent", .module = agent_module },
+        },
+    });
     const exe = b.addExecutable(.{
         .name = "hen",
         .root_module = b.createModule(.{
@@ -54,6 +62,13 @@ pub fn build(b: *std.Build) void {
 
     const run_chicken_tests = b.addRunArtifact(chicken_tests);
 
+    const session_tests = b.addTest(.{
+        .name = "agent-session-tests",
+        .root_module = agent_test_module,
+    });
+
+    const run_session_tests = b.addRunArtifact(session_tests);
+
     const agent_tests = b.addTest(.{
         .root_module = agent_module,
     });
@@ -69,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_chicken_tests.step);
     test_step.dependOn(&run_agent_tests.step);
+    test_step.dependOn(&run_session_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
 
