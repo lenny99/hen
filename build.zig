@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
 }
 
 const LibChicken = struct {
-    b: *std.Build,
+    owner: *std.Build,
     step: *std.Build.Step,
     prefix: []u8,
 
@@ -78,13 +78,13 @@ const LibChicken = struct {
         const chicken = b.step("chicken", "build chicken");
         chicken.makeFn = if (force) makeForce else make;
 
-        return .{ .b = b, .step = chicken, .prefix = prefix };
+        return .{ .owner = b, .step = chicken, .prefix = prefix };
     }
 
     fn link(self: *const @This(), mod: *std.Build.Module) void {
-        const b = self.b;
-        mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "include" }) });
-        mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "lib/libchicken-static.a" }) });
+        const owner = self.owner;
+        mod.addIncludePath(.{ .cwd_relative = owner.pathJoin(&.{ self.prefix, "include" }) });
+        mod.addObjectFile(.{ .cwd_relative = owner.pathJoin(&.{ self.prefix, "lib/libchicken-static.a" }) });
         mod.linkSystemLibrary("m", .{ .use_pkg_config = .no });
     }
 
