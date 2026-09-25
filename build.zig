@@ -62,52 +62,23 @@ const LibChicken = struct {
     step: *std.Build.Step,
     prefix: []u8,
 
+    /// Stamp recipe version. Bump when the configure/install commands below
+    /// change, so installs made by an older recipe are invalidated.
+    const recipe = "v1";
+
+    /// One step owns the whole vendored-CHICKEN build: guard, configure,
+    /// make, install, stamp. Cached while vendor-out/chicken-core/.chicken-
+    /// commit records the current vendors/chicken-core commit and the
+    /// installed artifacts exist. `zig build -Dchicken-force=true` bypasses
+    /// the cache and refreshes the stamp.
     fn build(b: *std.Build) @This() {
         const prefix = b.pathFromRoot("vendor-out/chicken-core");
-        const path = b.path("vendors/chicken-core");
-
-        const configure_script =
-            \\# Skip reconfiguration when config.make exists, records this prefix, and
-            \\# the configure script itself has not changed.
-            \\if [ -f config.make ] && grep -qF "PREFIX = $1" config.make && [ ! ./configure -nt config.make ]; then
-            \\    echo "chicken: config.make is up to date, skipping configure"
-            \\    exit 0
-            \\fi
-            \\./configure --prefix "$1" --chicken '$(which chicken)/..'
-        ;
-        const configure = b.addSystemCommand(&.{ "sh", "-c", configure_script, "sh", prefix });
-        {
-            configure.setCwd(path);
-        }
-
-        const make = b.addSystemCommand(&.{ "make", "-j" });
-        {
-            make.setCwd(path);
-            make.step.dependOn(&configure.step);
-        }
-
-        const install_script =
-            \\lib="$1/lib/libchicken-static.a"
-            \\# Skip installation when the installed static library exists and nothing
-            \\# in the source tree is newer than it.
-            \\if [ -f "$lib" ] && [ -z "$(find . -name .git -prune -o -newer "$lib" -print -quit)" ]; then
-            \\    echo "chicken: installed files are up to date, skipping make install"
-            \\    exit 0
-            \\fi
-            \\make install
-        ;
-        const install = b.addSystemCommand(&.{ "sh", "-c", install_script, "sh", prefix });
-        {
-            install.setCwd(path);
-            install.step.dependOn(&make.step);
-        }
+        const force = b.option(bool, "chicken-force", "force rebuilding vendored CHICKEN") orelse false;
 
         const chicken = b.step("chicken", "build chicken");
-        {
-            chicken.dependOn(&install.step);
-        }
+        chicken.makeFn = if (force) makeForce else make;
 
-        return @This(){ .b = b, .step = chicken, .prefix = prefix };
+        return .{ .b = b, .step = chicken, .prefix = prefix };
     }
 
     fn link(self: *const @This(), mod: *std.Build.Module) void {
@@ -115,5 +86,123 @@ const LibChicken = struct {
         mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "include" }) });
         mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ self.prefix, "lib/libchicken-static.a" }) });
         mod.linkSystemLibrary("m", .{ .use_pkg_config = .no });
+    }
+
+    /// Cache key: "<recipe>:<chicken-core commit>" plus "-dirty" when tracked
+    /// files differ from HEAD. Null when git or the repository is
+    /// unavailable, which means: always build, never write the stamp.
+    fn commitKey(b: *std.Build, io: std.Io) ?[]const u8 {
+        const src = b.pathFromRoot("vendors/chicken-core");
+        const head = std.process.run(b.allocator, io, .{
+            .argv = &.{ "git", "-C", src, "rev-parse", "HEAD" },
+        }) catch return null;
+        const code: u8 = switch (head.term) {
+            .exited => |c| c,
+            else => return null,
+        };
+        if (code != 0) return null;
+        const hash = std.mem.trim(u8, head.stdout, " \t\r\n");
+        if (hash.len == 0) return null;
+
+        // Tracked local edits change the build without changing the commit,
+        // so they mark the key -dirty and force a rebuild. Different edits
+        // between two dirty states are not distinguished; -Dchicken-force
+        // covers that.
+        const dirty = std.process.run(b.allocator, io, .{
+            .argv = &.{ "git", "-C", src, "diff-index", "--quiet", "HEAD", "--" },
+        }) catch return b.fmt("{s}:{s}-dirty", .{ recipe, hash });
+        const clean = switch (dirty.term) {
+            .exited => |c| c == 0,
+            else => false,
+        };
+        return if (clean)
+            b.fmt("{s}:{s}", .{ recipe, hash })
+        else
+            b.fmt("{s}:{s}-dirty", .{ recipe, hash });
+    }
+
+    /// Guarded build: skip the configure/make/install chain while the stamp
+    /// records this key and the installed artifacts exist.
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+        const b = step.owner;
+        const io = b.graph.io;
+
+        const key = commitKey(b, io);
+        if (key) |k| {
+            if (stampMatches(io, b, k) and artifactsExist(io, b)) {
+                std.debug.print("chicken: {s} up to date, skipping configure/make/install\n", .{k});
+                return;
+            }
+        }
+
+        try runChain(b, step, options, io);
+        if (key) |k| try writeStamp(io, b, k);
+    }
+
+    /// -Dchicken-force=true: same chain, no guard; refreshes the stamp.
+    fn makeForce(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+        const b = step.owner;
+        const io = b.graph.io;
+
+        const key = commitKey(b, io);
+        try runChain(b, step, options, io);
+        if (key) |k| try writeStamp(io, b, k);
+    }
+
+    fn runChain(
+        b: *std.Build,
+        step: *std.Build.Step,
+        options: std.Build.Step.MakeOptions,
+        io: std.Io,
+    ) anyerror!void {
+        const src = b.pathFromRoot("vendors/chicken-core");
+        const prefix = b.pathFromRoot("vendor-out/chicken-core");
+        // Byte-identical to the previous configure/make/install Run steps;
+        // "$(which chicken)/.." stays literal, as before.
+        try runCmd(step, options, io, &.{ "./configure", "--prefix", prefix, "--chicken", "$(which chicken)/.." }, src);
+        try runCmd(step, options, io, &.{ "make", "-j" }, src);
+        try runCmd(step, options, io, &.{ "make", "install" }, src);
+    }
+
+    fn runCmd(
+        step: *std.Build.Step,
+        options: std.Build.Step.MakeOptions,
+        io: std.Io,
+        argv: []const []const u8,
+        cwd: []const u8,
+    ) anyerror!void {
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .cwd = .{ .path = cwd },
+            .progress_node = options.progress_node,
+        }) catch |err| return step.fail("chicken: unable to spawn {s}: {t}", .{ argv[0], err });
+        const term = child.wait(io) catch |err| return step.fail("chicken: {s} failed: {t}", .{ argv[0], err });
+        const code: u8 = switch (term) {
+            .exited => |c| c,
+            else => return step.fail("chicken: {s} terminated abnormally", .{argv[0]}),
+        };
+        if (code != 0) return step.fail("chicken: {s} exited with code {d}", .{ argv[0], code });
+    }
+
+    fn stampMatches(io: std.Io, b: *std.Build, key: []const u8) bool {
+        const stamp = b.pathJoin(&.{ b.pathFromRoot("vendor-out/chicken-core"), ".chicken-commit" });
+        const recorded = std.Io.Dir.cwd().readFileAlloc(io, stamp, b.allocator, std.Io.Limit.limited(128)) catch return false;
+        return std.mem.eql(u8, std.mem.trim(u8, recorded, " \t\r\n"), key);
+    }
+
+    fn artifactsExist(io: std.Io, b: *std.Build) bool {
+        const cwd = std.Io.Dir.cwd();
+        const prefix = b.pathFromRoot("vendor-out/chicken-core");
+        _ = cwd.statFile(io, b.pathJoin(&.{ prefix, "lib/libchicken-static.a" }), .{}) catch return false;
+        _ = cwd.statFile(io, b.pathJoin(&.{ prefix, "include/chicken" }), .{}) catch return false;
+        return true;
+    }
+
+    /// Record the key only after the chain succeeded, so a failed build
+    /// never poisons the cache.
+    fn writeStamp(io: std.Io, b: *std.Build, key: []const u8) !void {
+        const stamp = b.pathJoin(&.{ b.pathFromRoot("vendor-out/chicken-core"), ".chicken-commit" });
+        const line = try std.fmt.allocPrint(b.allocator, "{s}\n", .{key});
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = stamp, .data = line });
     }
 };
