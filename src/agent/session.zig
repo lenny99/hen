@@ -1,7 +1,10 @@
 const std = @import("std");
 const uuid = @import("uuid");
-const provider = @import("provider.zig");
-const Provider = provider.Provider;
+const provider_mod = @import("provider.zig");
+const message_mod = @import("message.zig");
+
+const Provider = provider_mod.Provider;
+const Message = message_mod.Message;
 
 pub const Session = struct {
     pub const Id = uuid.UUID;
@@ -9,23 +12,23 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     id: Id,
     provider: Provider,
-    messages: std.DoublyLinkedList,
+    messages: std.ArrayList(Message),
 
-    pub fn init(allocator: std.mem.Allocator, id: Id, provider_value: Provider) Session {
+    pub fn init(allocator: std.mem.Allocator, id: Id, provider: Provider) Session {
         return .{
             .allocator = allocator,
             .id = id,
-            .provider = provider_value,
-            .messages = .{},
+            .provider = provider,
+            .messages = .empty,
         };
     }
 
-    pub fn stream(
-        self: *const Session,
-        model: provider.ModelId,
-        system: provider.SystemPrompt,
-        tools: *const std.ArrayList(provider.Tool),
-    ) (std.Io.Cancelable || Provider.Error)!void {
-        return self.provider.stream(model, system, &self.messages, tools, self.id);
+    pub fn appendMessage(self: *Session, message: []const u8) !void {
+        const userMessage = Message{ .userMessage = .{ .content = message } };
+        try self.messages.append(self.allocator, userMessage);
+    }
+
+    pub fn deinit(self: *Session) void {
+        self.messages.deinit(self.allocator);
     }
 };
