@@ -4,16 +4,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const chicken = LibChicken.build(b);
-    b.getInstallStep().dependOn(chicken.step);
+    const chicken_build = LibChicken.build(b);
+    b.getInstallStep().dependOn(chicken_build.step);
+
+    const chicken_module = b.addModule("chicken", .{
+        .root_source_file = b.path("src/chicken.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    (&chicken_build).link(chicken_module);
 
     const mod = b.addModule("hen", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .link_libc = true,
+        .imports = &.{
+            .{ .name = "chicken", .module = chicken_module },
+        },
     });
-
-    (&chicken).link(mod);
 
     const exe = b.addExecutable(.{
         .name = "hen",
@@ -40,6 +47,12 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    const chicken_tests = b.addTest(.{
+        .root_module = chicken_module,
+    });
+
+    const run_chicken_tests = b.addRunArtifact(chicken_tests);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
@@ -53,6 +66,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_chicken_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
