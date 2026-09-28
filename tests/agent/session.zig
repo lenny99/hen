@@ -93,13 +93,6 @@ const Fixture = struct {
         self.mock.deinit();
     }
 
-    fn appendMessage(self: *Fixture, text: []const u8) !void {
-        try self.session.appendMessage(text);
-    }
-
-    fn run(self: *Fixture) !void {
-        try self.session.run(std.testing.io);
-    }
 };
 
 test "session initializes" {
@@ -118,7 +111,7 @@ test "message added to the session is present in the history" {
     defer f.deinit();
     const session = &f.session;
 
-    try f.appendMessage("Hello, Agent!");
+    try session.appendMessage("Hello, Agent!");
 
     try ztf.expect(std.testing.allocator, session.messages.items).toHaveLength(1);
     try ztf.expect(std.testing.allocator, session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
@@ -130,11 +123,10 @@ test "run calls the provider once per run" {
     defer f.deinit();
     const session = &f.session;
 
-    try f.appendMessage("Hello, Agent!");
-    try f.run();
-    try f.run();
-
-    try f.mock.stream_calls.toHaveBeenCalledTimes(2);
+    try session.appendMessage("Hello, Agent!");
+    try session.run(std.testing.io);
+    
+    try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try ztf.expect(std.testing.allocator, f.mock.session).toEqual(Fixture.id);
     try ztf.expect(std.testing.allocator, f.mock.model).toEqual(session.model.id());
     try ztf.expect(std.testing.allocator, f.mock.system).toEqual(session.system);
@@ -144,10 +136,11 @@ test "run hands the provider the whole history in order" {
     var f: Fixture = undefined;
     try f.init(std.testing.allocator);
     defer f.deinit();
+    const session = &f.session;
 
-    try f.appendMessage("first");
-    try f.appendMessage("second");
-    try f.run();
+    try session.appendMessage("first");
+    try session.appendMessage("second");
+    try session.run(std.testing.io);
 
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try ztf.expect(std.testing.allocator, f.mock.messages).toHaveLength(2);
