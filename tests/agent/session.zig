@@ -8,13 +8,21 @@ const MessageStream = agent.Stream(Message);
 const MockProvider = struct {
     const Error = agent.Provider.Error;
 
-    calls: usize = 0,
+    /// One counter for each function that the mock provides.
+    const Calls = struct {
+        stream: usize = 0,
+        supplyNext: usize = 0,
+    };
+
+    calls: Calls = .{},
     model: agent.ModelId = "",
     system: agent.SystemPrompt = "",
     session: agent.Session.Id = .nil,
 
-    fn supplyNext(io: std.Io) MessageStream.Error!?Message {
+    fn supplyNext(impl: *anyopaque, io: std.Io) MessageStream.Error!?Message {
+        const self: *MockProvider = @ptrCast(@alignCast(impl));
         _ = io;
+        self.calls.supplyNext += 1;
         return Message{.userMessage = .{.content = "Hello World"}};
     }
 
@@ -28,11 +36,12 @@ const MockProvider = struct {
         session: agent.Session.Id,
     ) Error!MessageStream {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
-        self.calls += 1;
+        self.calls.stream += 1;
         self.model = model;
         self.system = system;
         self.session = session;
         return MessageStream {
+            .impl = self,
             .next_fn = supplyNext
         };
     }
@@ -79,6 +88,19 @@ const Fixture = struct {
     fn run(self: *Fixture) !void {
         try self.session.run(std.testing.io);
     }
+
+    /// Open a stream through the provider of this session.
+    fn openStream(self: *Fixture) !MessageStream {
+        return agent.Provider.stream(
+            self.provider.*,
+            std.testing.io,
+            self.session.model.id(),
+            self.session.system,
+            self.session.messages.items,
+            self.session.tools.items,
+            self.session.id,
+        );
+    }
 };
 
 test "session initializes" {
@@ -114,6 +136,21 @@ test "session with message sends system prompt and message" {
 
     try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
     try std.testing.expectEqualStrings("Hello, Agent!", session.messages.items[0].userMessage.content);
-    try std.testing.expectEqual(@as(usize, 1), f.mock.calls);
+    try std.testing.expectEqual(@as(usize, 1), f.mock.calls.stream);
     try std.testing.expectEqual(Fixture.id, f.mock.session);
+}
+
+test "stream next counts each call and returns the message" {
+    var f: Fixture = undefined;
+    try f.init(std.testing.allocator);
+    defer f.deinit();
+
+    const stream = try f.openStream();
+    const first = try stream.next(std.testing.io);
+    const second = try stream.next(std.testing.io);
+
+    try std.testing.expectEqualStrings("Hello World", first.?.userMessage.content);
+    try std.testing.expectEqualStrings("Hello World", second.?.userMessage.content);
+    try std.testing.expectEqual(@as(usize, 1), f.mock.calls.stream);
+    try std.testing.expectEqual(@as(usize, 2), f.mock.calls.supplyNext);
 }

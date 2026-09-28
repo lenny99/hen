@@ -58,22 +58,23 @@ pub const Provider = struct {
     }
 };
 
-pub fn Stream(comptime t: type) type {
-    const Self = @This();
-
-    return struct {
+    pub fn Stream(comptime t: type) type {
+        return struct {
+            const Self = @This();
         pub const Item = t;
 
         pub const Error = error{Failed} || std.Io.Cancelable;
 
         pub const NextFn = *const fn(
+            impl: *anyopaque,
             io: std.Io,
         ) (Error || std.Io.Cancelable)!?Item;
 
+        impl: *anyopaque,
         next_fn: NextFn,
 
-        pub fn next(self: Self, io: std.Io) Error!?bool {
-            return self.next_fn(io);
+        pub fn next(self: Self, io: std.Io) Error!?Item {
+            return self.next_fn(self.impl, io);
         }
     };
 }
