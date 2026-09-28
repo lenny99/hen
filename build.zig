@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
 
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
+
     const agent_module = b.addModule("agent", .{
         .root_source_file = b.path("src/agent/root.zig"),
         .target = target,
@@ -33,6 +34,27 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
         },
     });
+
+    const provider_module = b.addModule("provider", .{
+        .root_source_file = b.path("src/providers/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "agent", .module = agent_module }
+        },
+    });
+
+    const provider_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/providers/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "agent", .module = agent_module },
+            .{ .name = "provider", .module = provider_module },
+            .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "hen",
         .root_module = b.createModule(.{
@@ -41,6 +63,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "agent", .module = agent_module },
+                .{ .name = "provider", .module = provider_module }
             },
         }),
     });
@@ -77,6 +100,13 @@ pub fn build(b: *std.Build) void {
 
     const run_agent_tests = b.addRunArtifact(agent_tests);
 
+    const provider_tests = b.addTest(.{
+        .name = "provider-tests",
+        .root_module = provider_test_module,
+    });
+
+    const run_provider_tests = b.addRunArtifact(provider_tests);
+
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -88,6 +118,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_session_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_provider_tests.step);
 }
 
 const LibChicken = struct {
