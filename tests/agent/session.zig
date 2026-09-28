@@ -188,20 +188,9 @@ test "the mocked stream hands out the messages the test asked for" {
     try session.appendMessage("Hello, Agent!");
     try session.run(std.testing.io);
 
-    // The session drops the stream, so ask the provider for it again.
-    const stream = try f.provider.stream(
-        std.testing.io,
-        session.model.id(),
-        session.system,
-        session.messages.items,
-        session.tools.items,
-        session.id,
-    );
-
-    const first = (try stream.next(std.testing.io)).?;
-    const second = (try stream.next(std.testing.io)).?;
-
-    try expect(first.assistantMessage.content).toEqual("Hi!");
-    try expect(second.assistantMessage.content).toEqual("How can I help?");
-    try expect(try stream.next(std.testing.io)).toBe(null);
+      try expect(session.messages.items).toHaveLength(3);
+    {
+          try expect(session.messages.items[1].assistantMessage.content).toBe("Hi!");
+          try expect(session.messages.items[2].assistantMessage.content).toBe("How can I help?");
+    }
 }

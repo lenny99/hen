@@ -120,7 +120,10 @@ pub const Session = struct {
     }
 
     pub fn run(self: *Session, io: std.Io) !void {
-        _ = try self.provider.stream(io, self.model.id(), self.system, self.messages.items, self.tools.items, self.id);
+        var stream = try self.provider.stream(io, self.model.id(), self.system, self.messages.items, self.tools.items, self.id);
+        while (try stream.next(io)) |message| {
+            try self.messages.append(self.allocator, message);
+        }
     }
 
     pub fn deinit(self: *Session) void {
