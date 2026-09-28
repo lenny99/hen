@@ -1,6 +1,6 @@
 const std = @import("std");
 const agent = @import("agent");
-
+const ztf = @import("zig_test_framework");
 
 const Message = agent.Message;
 const MessageStream = agent.Stream(Message);
@@ -8,21 +8,28 @@ const MessageStream = agent.Stream(Message);
 const MockProvider = struct {
     const Error = agent.Provider.Error;
 
-    /// One counter for each function that the mock provides.
-    const Calls = struct {
-        stream: usize = 0,
-        supplyNext: usize = 0,
-    };
+    /// The framework mock records every call to `stream`.
+    stream_calls: ztf.Mock(MessageStream),
 
-    calls: Calls = .{},
     model: agent.ModelId = "",
     system: agent.SystemPrompt = "",
     session: agent.Session.Id = .nil,
 
-    fn supplyNext(impl: *anyopaque, io: std.Io) MessageStream.Error!?Message {
-        const self: *MockProvider = @ptrCast(@alignCast(impl));
+    /// The framework keeps call arguments as text, so the typed history goes
+    /// in these two fields.
+    messages: []const Message = &.{},
+    tools: []const agent.Tool = &.{},
+
+    fn init(alloc: std.mem.Allocator) MockProvider {
+        return .{ .stream_calls = ztf.Mock(MessageStream).init(alloc) };
+    }
+
+    fn deinit(self: *MockProvider) void {
+        self.stream_calls.deinit();
+    }
+
+    fn supplyNext(_: *anyopaque, io: std.Io) MessageStream.Error!?Message {
         _ = io;
-        self.calls.supplyNext += 1;
         return Message{.userMessage = .{.content = "Hello World"}};
     }
 
@@ -31,16 +38,18 @@ const MockProvider = struct {
         _: std.Io,
         model: agent.ModelId,
         system: agent.SystemPrompt,
-        _: []const Message,
-        _: []const agent.Tool,
+        messages: []const Message,
+        tools: []const agent.Tool,
         session: agent.Session.Id,
     ) Error!MessageStream {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
-        self.calls.stream += 1;
         self.model = model;
         self.system = system;
+        self.messages = messages;
+        self.tools = tools;
         self.session = session;
-        return MessageStream {
+        self.stream_calls.recordCall("stream") catch return error.ProviderError;
+        return self.stream_calls.getReturnValue() orelse MessageStream {
             .impl = self,
             .next_fn = supplyNext
         };
@@ -71,14 +80,17 @@ const Fixture = struct {
     /// points at the mock, and a returned value leaves that pointer on a copy.
     fn init(self: *Fixture, allocator: std.mem.Allocator) !void {
         self.allocator = allocator;
-        self.mock = .{};
+        self.mock = MockProvider.init(allocator);
+        errdefer self.mock.deinit();
         self.provider = try self.mock.asProvider(allocator);
+        errdefer self.allocator.destroy(self.provider);
         self.session = try agent.Session.init(allocator, id, self.provider);
     }
 
     fn deinit(self: *Fixture) void {
         self.session.deinit();
         self.allocator.destroy(self.provider);
+        self.mock.deinit();
     }
 
     fn appendMessage(self: *Fixture, text: []const u8) !void {
@@ -88,19 +100,6 @@ const Fixture = struct {
     fn run(self: *Fixture) !void {
         try self.session.run(std.testing.io);
     }
-
-    /// Open a stream through the provider of this session.
-    fn openStream(self: *Fixture) !MessageStream {
-        return agent.Provider.stream(
-            self.provider.*,
-            std.testing.io,
-            self.session.model.id(),
-            self.session.system,
-            self.session.messages.items,
-            self.session.tools.items,
-            self.session.id,
-        );
-    }
 };
 
 test "session initializes" {
@@ -109,8 +108,8 @@ test "session initializes" {
     defer f.deinit();
     const session = &f.session;
 
-    try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
-    try std.testing.expectEqual(Fixture.id, session.id);
+    try ztf.expect(std.testing.allocator, session.messages.items).toBeEmpty();
+    try ztf.expect(std.testing.allocator, Fixture.id).toEqual(session.id);
 }
 
 test "message added to the session is present in the history" {
@@ -121,11 +120,11 @@ test "message added to the session is present in the history" {
 
     try f.appendMessage("Hello, Agent!");
 
-    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
-    try std.testing.expectEqualStrings("Hello, Agent!", session.messages.items[0].userMessage.content);
+    try ztf.expect(std.testing.allocator, session.messages.items).toHaveLength(1);
+    try ztf.expect(std.testing.allocator, session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
 }
 
-test "session with message sends system prompt and message" {
+test "run calls the provider once per run" {
     var f: Fixture = undefined;
     try f.init(std.testing.allocator);
     defer f.deinit();
@@ -133,9 +132,26 @@ test "session with message sends system prompt and message" {
 
     try f.appendMessage("Hello, Agent!");
     try f.run();
+    try f.run();
 
-    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
-    try std.testing.expectEqualStrings("Hello, Agent!", session.messages.items[0].userMessage.content);
-    try std.testing.expectEqual(@as(usize, 1), f.mock.calls.stream);
-    try std.testing.expectEqual(Fixture.id, f.mock.session);
+    try f.mock.stream_calls.toHaveBeenCalledTimes(2);
+    try ztf.expect(std.testing.allocator, f.mock.session).toEqual(Fixture.id);
+    try ztf.expect(std.testing.allocator, f.mock.model).toEqual(session.model.id());
+    try ztf.expect(std.testing.allocator, f.mock.system).toEqual(session.system);
+}
+
+test "run hands the provider the whole history in order" {
+    var f: Fixture = undefined;
+    try f.init(std.testing.allocator);
+    defer f.deinit();
+
+    try f.appendMessage("first");
+    try f.appendMessage("second");
+    try f.run();
+
+    try f.mock.stream_calls.toHaveBeenCalledTimes(1);
+    try ztf.expect(std.testing.allocator, f.mock.messages).toHaveLength(2);
+    try ztf.expect(std.testing.allocator, f.mock.messages[0].userMessage.content).toEqual("first");
+    try ztf.expect(std.testing.allocator, f.mock.messages[1].userMessage.content).toEqual("second");
+    try ztf.expect(std.testing.allocator, f.mock.tools).toBeEmpty();
 }

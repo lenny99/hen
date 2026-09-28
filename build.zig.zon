@@ -36,6 +36,10 @@
             .url = "https://github.com/muhammad-fiaz/uuid.zig/archive/refs/tags/0.0.1.tar.gz",
             .hash = "uuid-0.0.1-bhwP1HBlAQCOeBsKy7fHmlSG9MdbaHG_mTSwH-MA8iIm",
         },
+        .@"zig-test-framework" = .{
+            .url = "https://github.com/zig-utils/zig-test-framework/archive/refs/heads/main.tar.gz",
+            .hash = "zig_test_framework-0.2.2-YyaA4JarBwDkp_9cLmPh2zsz4csi6R4-z2LsthfXRLRQ",
+        },
     },
     .paths = .{
         "build.zig",

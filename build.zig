@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     (&chicken_build).link(chicken_module);
 
     const uuid = b.dependency("uuid", .{ .target = target });
+    const ztf = b.dependency("zig-test-framework", .{ .target = target });
     const agent_module = b.addModule("agent", .{
         .root_source_file = b.path("src/agent/root.zig"),
         .target = target,
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "agent", .module = agent_module },
+            .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
         },
     });
     const exe = b.addExecutable(.{
