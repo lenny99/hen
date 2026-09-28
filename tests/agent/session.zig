@@ -19,18 +19,35 @@ const MockProvider = struct {
     /// in these two fields.
     messages: []const Message = &.{},
     tools: []const agent.Tool = &.{},
+    allocator: std.mem.Allocator,
+
+    /// The messages the mocked stream hands out, in order. After the last
+    /// one the stream ends, and `next` returns null.
+    replies: std.ArrayList(Message) = .empty,
 
     fn init(alloc: std.mem.Allocator) MockProvider {
-        return .{ .stream_calls = ztf.Mock(MessageStream).init(alloc) };
+        return .{
+            .allocator = alloc,
+            .stream_calls = ztf.Mock(MessageStream).init(alloc),
+        };
     }
 
     fn deinit(self: *MockProvider) void {
+        self.replies.deinit(self.allocator);
         self.stream_calls.deinit();
     }
 
-    fn supplyNext(_: *anyopaque, io: std.Io) MessageStream.Error!?Message {
+    fn supplyNext(impl: *anyopaque, io: std.Io) MessageStream.Error!?Message {
         _ = io;
-        return Message{.userMessage = .{.content = "Hello World"}};
+        const self: *MockProvider = @ptrCast(@alignCast(impl));
+        if (self.replies.items.len == 0) return null;
+        return self.replies.orderedRemove(0);
+    }
+
+    /// Make the stream hand out these messages, in order.
+    fn returns(self: *MockProvider, messages: []const Message) !void {
+        self.replies.clearRetainingCapacity();
+        try self.replies.appendSlice(self.allocator, messages);
     }
 
     fn stream(
@@ -147,4 +164,36 @@ test "run hands the provider the whole history in order" {
     try ztf.expect(std.testing.allocator, f.mock.messages[0].userMessage.content).toEqual("first");
     try ztf.expect(std.testing.allocator, f.mock.messages[1].userMessage.content).toEqual("second");
     try ztf.expect(std.testing.allocator, f.mock.tools).toBeEmpty();
+}
+
+test "the mocked stream hands out the messages the test asked for" {
+    var f: Fixture = undefined;
+    try f.init(std.testing.allocator);
+    defer f.deinit();
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .assistantMessage = .{ .content = "Hi!" } },
+        .{ .assistantMessage = .{ .content = "How can I help?" } },
+    });
+
+    try session.appendMessage("Hello, Agent!");
+    try session.run(std.testing.io);
+
+    // The session drops the stream, so ask the provider for it again.
+    const stream = try f.provider.stream(
+        std.testing.io,
+        session.model.id(),
+        session.system,
+        session.messages.items,
+        session.tools.items,
+        session.id,
+    );
+
+    const first = (try stream.next(std.testing.io)).?;
+    const second = (try stream.next(std.testing.io)).?;
+
+    try ztf.expect(std.testing.allocator, first.assistantMessage.content).toEqual("Hi!");
+    try ztf.expect(std.testing.allocator, second.assistantMessage.content).toEqual("How can I help?");
+    try ztf.expect(std.testing.allocator, try stream.next(std.testing.io)).toBe(null);
 }
