@@ -5,6 +5,14 @@ const ztf = @import("zig_test_framework");
 const Message = agent.Message;
 const MessageStream = agent.Stream(Message);
 
+/// `ztf.expect` asks for an allocator, but it never uses it. The matchers only
+/// call `std.debug.print`. Keep that argument out of the tests with this
+/// helper. It still passes `std.testing.allocator`, so a leak inside the
+/// framework still fails the test run.
+inline fn expect(actual: anytype) @TypeOf(ztf.expect(std.testing.allocator, actual)) {
+    return ztf.expect(std.testing.allocator, actual);
+}
+
 const MockProvider = struct {
     const Error = agent.Provider.Error;
 
@@ -118,8 +126,8 @@ test "session initializes" {
     defer f.deinit();
     const session = &f.session;
 
-    try ztf.expect(std.testing.allocator, session.messages.items).toBeEmpty();
-    try ztf.expect(std.testing.allocator, Fixture.id).toEqual(session.id);
+    try expect(session.messages.items).toBeEmpty();
+    try expect(Fixture.id).toEqual(session.id);
 }
 
 test "message added to the session is present in the history" {
@@ -130,8 +138,8 @@ test "message added to the session is present in the history" {
 
     try session.appendMessage("Hello, Agent!");
 
-    try ztf.expect(std.testing.allocator, session.messages.items).toHaveLength(1);
-    try ztf.expect(std.testing.allocator, session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
+    try expect(session.messages.items).toHaveLength(1);
+    try expect(session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
 }
 
 test "run calls the provider once per run" {
@@ -144,9 +152,9 @@ test "run calls the provider once per run" {
     try session.run(std.testing.io);
     
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
-    try ztf.expect(std.testing.allocator, f.mock.session).toEqual(Fixture.id);
-    try ztf.expect(std.testing.allocator, f.mock.model).toEqual(session.model.id());
-    try ztf.expect(std.testing.allocator, f.mock.system).toEqual(session.system);
+    try expect(f.mock.session).toEqual(Fixture.id);
+    try expect(f.mock.model).toEqual(session.model.id());
+    try expect(f.mock.system).toEqual(session.system);
 }
 
 test "run hands the provider the whole history in order" {
@@ -160,10 +168,10 @@ test "run hands the provider the whole history in order" {
     try session.run(std.testing.io);
 
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
-    try ztf.expect(std.testing.allocator, f.mock.messages).toHaveLength(2);
-    try ztf.expect(std.testing.allocator, f.mock.messages[0].userMessage.content).toEqual("first");
-    try ztf.expect(std.testing.allocator, f.mock.messages[1].userMessage.content).toEqual("second");
-    try ztf.expect(std.testing.allocator, f.mock.tools).toBeEmpty();
+    try expect(f.mock.messages).toHaveLength(2);
+    try expect(f.mock.messages[0].userMessage.content).toEqual("first");
+    try expect(f.mock.messages[1].userMessage.content).toEqual("second");
+    try expect(f.mock.tools).toBeEmpty();
 }
 
 test "the mocked stream hands out the messages the test asked for" {
@@ -193,7 +201,7 @@ test "the mocked stream hands out the messages the test asked for" {
     const first = (try stream.next(std.testing.io)).?;
     const second = (try stream.next(std.testing.io)).?;
 
-    try ztf.expect(std.testing.allocator, first.assistantMessage.content).toEqual("Hi!");
-    try ztf.expect(std.testing.allocator, second.assistantMessage.content).toEqual("How can I help?");
-    try ztf.expect(std.testing.allocator, try stream.next(std.testing.io)).toBe(null);
+    try expect(first.assistantMessage.content).toEqual("Hi!");
+    try expect(second.assistantMessage.content).toEqual("How can I help?");
+    try expect(try stream.next(std.testing.io)).toBe(null);
 }
