@@ -91,8 +91,6 @@ pub const Tool = struct {
 pub const Session = struct {
     pub const Id = uuid.UUID;
 
-    allocator: std.mem.Allocator,
-
     id: Id,
     provider: *const Provider,
     model: *const Model,
@@ -101,9 +99,8 @@ pub const Session = struct {
     messages: std.ArrayList(Message),
     tools: std.ArrayList(Tool),
 
-    pub fn init(allocator: std.mem.Allocator, id: Id, provider: *const Provider) !Session {
+    pub fn init(id: Id, provider: *const Provider) !Session {
         return .{
-            .allocator = allocator,
             .id = id,
             .provider = provider,
             // TODO: need switching to models?
@@ -114,19 +111,19 @@ pub const Session = struct {
         };
     }
 
-    pub fn appendMessage(self: *Session, message: []const u8) !void {
+    pub fn appendMessage(self: *Session, alloc: std.mem.Allocator, message: []const u8) !void {
         const userMessage = Message{ .userMessage = .{ .content = message } };
-        try self.messages.append(self.allocator, userMessage);
+        try self.messages.append(alloc, userMessage);
     }
 
-    pub fn run(self: *Session, io: std.Io) !void {
+    pub fn run(self: *Session, io: std.Io, alloc: std.mem.Allocator) !void {
         var stream = try self.provider.stream(io, self.model.id(), self.system, self.messages.items, self.tools.items, self.id);
         while (try stream.next(io)) |message| {
-            try self.messages.append(self.allocator, message);
+            try self.messages.append(alloc, message);
         }
     }
 
-    pub fn deinit(self: *Session) void {
-        self.messages.deinit(self.allocator);
+    pub fn deinit(self: *Session, alloc: std.mem.Allocator) void {
+        self.messages.deinit(alloc);
     }
 };

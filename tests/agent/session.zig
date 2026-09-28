@@ -96,25 +96,23 @@ const Fixture = struct {
         0x0d, 0x0e, 0x0f, 0x10,
     });
 
-    allocator: std.mem.Allocator,
     mock: MockProvider,
     provider: *const agent.Provider,
     session: agent.Session,
 
     /// Fill in the fields. Do not return a Fixture by value. The provider
     /// points at the mock, and a returned value leaves that pointer on a copy.
-    fn init(self: *Fixture, allocator: std.mem.Allocator) !void {
-        self.allocator = allocator;
-        self.mock = MockProvider.init(allocator);
+    fn init(self: *Fixture, alloc: std.mem.Allocator) !void {
+        self.mock = MockProvider.init(alloc);
         errdefer self.mock.deinit();
-        self.provider = try self.mock.asProvider(allocator);
+        self.provider = try self.mock.asProvider(alloc);
         errdefer self.allocator.destroy(self.provider);
-        self.session = try agent.Session.init(allocator, id, self.provider);
+        self.session = try agent.Session.init(id, self.provider);
     }
 
-    fn deinit(self: *Fixture) void {
-        self.session.deinit();
-        self.allocator.destroy(self.provider);
+    fn deinit(self: *Fixture, alloc: std.mem.Allocator) void {
+        self.session.deinit(alloc);
+        alloc.destroy(self.provider);
         self.mock.deinit();
     }
 
@@ -123,7 +121,7 @@ const Fixture = struct {
 test "session initializes" {
     var f: Fixture = undefined;
     try f.init(std.testing.allocator);
-    defer f.deinit();
+    defer f.deinit(std.testing.allocator);
     const session = &f.session;
 
     try expect(session.messages.items).toBeEmpty();
@@ -131,25 +129,27 @@ test "session initializes" {
 }
 
 test "message added to the session is present in the history" {
+    const alloc = std.testing.allocator;
     var f: Fixture = undefined;
-    try f.init(std.testing.allocator);
-    defer f.deinit();
+    try f.init(alloc);
+    defer f.deinit(alloc);
     const session = &f.session;
 
-    try session.appendMessage("Hello, Agent!");
+    try session.appendMessage(alloc, "Hello, Agent!");
 
     try expect(session.messages.items).toHaveLength(1);
     try expect(session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
 }
 
 test "run calls the provider once per run" {
+    const alloc = std.testing.allocator;
     var f: Fixture = undefined;
-    try f.init(std.testing.allocator);
-    defer f.deinit();
+    try f.init(alloc);
+    defer f.deinit(alloc);
     const session = &f.session;
 
-    try session.appendMessage("Hello, Agent!");
-    try session.run(std.testing.io);
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
     
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try expect(f.mock.session).toEqual(Fixture.id);
@@ -158,14 +158,15 @@ test "run calls the provider once per run" {
 }
 
 test "run hands the provider the whole history in order" {
+    const alloc = std.testing.allocator;
     var f: Fixture = undefined;
-    try f.init(std.testing.allocator);
-    defer f.deinit();
+    try f.init(alloc);
+    defer f.deinit(alloc);
     const session = &f.session;
 
-    try session.appendMessage("first");
-    try session.appendMessage("second");
-    try session.run(std.testing.io);
+    try session.appendMessage(alloc, "first");
+    try session.appendMessage(alloc, "second");
+    try session.run(std.testing.io, alloc);
 
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try expect(f.mock.messages).toHaveLength(2);
@@ -175,9 +176,10 @@ test "run hands the provider the whole history in order" {
 }
 
 test "the mocked stream hands out the messages the test asked for" {
+    const alloc = std.testing.allocator;
     var f: Fixture = undefined;
-    try f.init(std.testing.allocator);
-    defer f.deinit();
+    try f.init(alloc);
+    defer f.deinit(alloc);
     const session = &f.session;
 
     try f.mock.returns(&.{
@@ -185,8 +187,8 @@ test "the mocked stream hands out the messages the test asked for" {
         .{ .assistantMessage = .{ .content = "How can I help?" } },
     });
 
-    try session.appendMessage("Hello, Agent!");
-    try session.run(std.testing.io);
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
 
       try expect(session.messages.items).toHaveLength(3);
     {
