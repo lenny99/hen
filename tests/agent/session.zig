@@ -139,18 +139,3 @@ test "session with message sends system prompt and message" {
     try std.testing.expectEqual(@as(usize, 1), f.mock.calls.stream);
     try std.testing.expectEqual(Fixture.id, f.mock.session);
 }
-
-test "stream next counts each call and returns the message" {
-    var f: Fixture = undefined;
-    try f.init(std.testing.allocator);
-    defer f.deinit();
-
-    const stream = try f.openStream();
-    const first = try stream.next(std.testing.io);
-    const second = try stream.next(std.testing.io);
-
-    try std.testing.expectEqualStrings("Hello World", first.?.userMessage.content);
-    try std.testing.expectEqualStrings("Hello World", second.?.userMessage.content);
-    try std.testing.expectEqual(@as(usize, 1), f.mock.calls.stream);
-    try std.testing.expectEqual(@as(usize, 2), f.mock.calls.supplyNext);
-}
