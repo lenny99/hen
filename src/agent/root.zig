@@ -1,6 +1,11 @@
 pub const Message = @import("message.zig").Message;
-pub const ModelId = @import("provider.zig").ModelId;
-pub const Provider = @import("provider.zig").Provider;
+
+const message = @import("provider.zig");
+pub const ModelId = message.ModelId;
+pub const Provider = message.Provider;
+pub const Stream = message.Stream;
+
 pub const Session = @import("session.zig").Session;
 pub const SystemPrompt = @import("provider.zig").SystemPrompt;
 pub const Tool = @import("provider.zig").Tool;
+

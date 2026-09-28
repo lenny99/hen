@@ -1,21 +1,33 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
+const message_mod = @import("message.zig");
+
+const Message = message_mod.Message;
+const session_mod = @import("session.zig");
+const Session = session_mod.Session;
+pub const Tool = session_mod.Tool;
+
 pub const ModelId = []const u8;
 pub const SystemPrompt = []const u8;
 
-pub const Tool = struct {};
-
 pub const Provider = struct {
-    pub const Error = error{ProviderError};
+    pub const Error = error{ProviderError} || std.Io.Cancelable;
+
     pub const StreamFn = *const fn (
         impl: *anyopaque,
+        io: std.Io,
         model: ModelId,
         system: SystemPrompt,
-        messages: *const std.DoublyLinkedList,
-        tools: *const std.ArrayList(Tool),
+        messages: []const Message,
+        tools: []const Tool,
         session: uuid.UUID,
-    ) (std.Io.Cancelable || Error)!void;
+    ) Error!Stream(Message);
+
+    pub const CancelFn = *const fn (
+        impl: *anyopaque,
+        io: std.Io
+    ) Error!void;
 
     impl: *anyopaque,
     table: struct {
@@ -31,12 +43,39 @@ pub const Provider = struct {
 
     pub fn stream(
         self: Provider,
+        io: std.Io,
         model: ModelId,
         system: SystemPrompt,
-        messages: *const std.DoublyLinkedList,
-        tools: *const std.ArrayList(Tool),
-        session: uuid.UUID,
-    ) (std.Io.Cancelable || Error)!void {
-        try self.table.stream(self.impl, model, system, messages, tools, session);
+        messages: []const Message,
+        tools: []const Tool,
+        session: Session.Id,
+    ) Error!Stream(Message) {
+        return self.table.stream(self.impl, io, model, system, messages, tools, session);
+    }
+
+    pub fn close(self: Provider, io: std.Io) Error!void {
+        return self.table.close(self.impl, io);
     }
 };
+
+pub fn Stream(comptime t: type) type {
+    const Self = @This();
+
+    return struct {
+        pub const Item = t;
+
+        pub const Error = error{Failed} || std.Io.Cancelable;
+
+        pub const NextFn = *const fn(
+            io: std.Io,
+        ) (Error || std.Io.Cancelable)!?Item;
+
+        next_fn: NextFn,
+
+        pub fn next(self: Self, io: std.Io) Error!?bool {
+            return self.next_fn(io);
+        }
+    };
+}
+
+
