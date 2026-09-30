@@ -25,6 +25,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const http_module = b.addModule("http", .{
+        .root_source_file = b.path("src/http/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const agent_test_module = b.createModule(.{
         .root_source_file = b.path("tests/agent/session.zig"),
         .target = target,
@@ -40,7 +47,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent", .module = agent_module }
+            .{ .name = "agent", .module = agent_module },
+            .{ .name = "http", .module = http_module },
         },
     });
 
@@ -51,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "agent", .module = agent_module },
             .{ .name = "provider", .module = provider_module },
+            .{ .name = "http", .module = http_module },
             .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
         },
     });
