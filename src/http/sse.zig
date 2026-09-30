@@ -52,6 +52,10 @@ pub const SseParser = struct {
 
     pub const Error = error{OutOfMemory};
 
+    const Self = @This();
+
+    pub const init: Self = .{};
+
     pub fn deinit(self: *SseParser, alloc: std.mem.Allocator) void {
         for (self.events.items) |e| {
             alloc.free(e.data);

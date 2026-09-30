@@ -1,3 +1,3 @@
 test {
-    _ = @import("opencode.zig");
+    _ = @import("open_code.zig");
 }

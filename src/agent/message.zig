@@ -1,10 +1,10 @@
 const std = @import("std");
 
 pub const Message = union(enum) {
-    userMessage: struct {
+    user: struct {
         content: []const u8,
     },
-    assistantMessage: struct {
+    assistant: struct {
         content: []const u8,
-    }
+    },
 };

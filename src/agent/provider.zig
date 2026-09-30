@@ -24,10 +24,7 @@ pub const Provider = struct {
         session: uuid.UUID,
     ) Error!Stream(Message);
 
-    pub const CancelFn = *const fn (
-        impl: *anyopaque,
-        io: std.Io
-    ) Error!void;
+    pub const CancelFn = *const fn (impl: *anyopaque, io: std.Io) Error!void;
 
     impl: *anyopaque,
     table: struct {
@@ -58,14 +55,14 @@ pub const Provider = struct {
     }
 };
 
-    pub fn Stream(comptime t: type) type {
-        return struct {
-            const Self = @This();
+pub fn Stream(comptime t: type) type {
+    return struct {
+        const Self = @This();
         pub const Item = t;
 
         pub const Error = error{Failed} || std.Io.Cancelable;
 
-        pub const NextFn = *const fn(
+        pub const NextFn = *const fn (
             impl: *anyopaque,
             io: std.Io,
         ) (Error || std.Io.Cancelable)!?Item;
@@ -78,5 +75,3 @@ pub const Provider = struct {
         }
     };
 }
-
-

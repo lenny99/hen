@@ -18,11 +18,7 @@ pub const Model = struct {
     }
 };
 
-const glm51 = Model{
-    .provider = "opencode",
-    .name = "glm-5.3-flash",
-    .context = 300.000
-};
+const glm51 = Model{ .provider = "opencode", .name = "glm-5.3-flash", .context = 300.000 };
 
 pub const Tool = struct {
     pub const Error = error{ToolFailed} || std.Io.Cancelable;
@@ -112,7 +108,7 @@ pub const Session = struct {
     }
 
     pub fn appendMessage(self: *Session, alloc: std.mem.Allocator, message: []const u8) !void {
-        const userMessage = Message{ .userMessage = .{ .content = message } };
+        const userMessage = Message{ .user = .{ .content = message } };
         try self.messages.append(alloc, userMessage);
     }
 

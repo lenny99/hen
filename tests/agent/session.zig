@@ -74,10 +74,7 @@ const MockProvider = struct {
         self.tools = tools;
         self.session = session;
         self.stream_calls.recordCall("stream") catch return error.ProviderError;
-        return self.stream_calls.getReturnValue() orelse MessageStream {
-            .impl = self,
-            .next_fn = supplyNext
-        };
+        return self.stream_calls.getReturnValue() orelse MessageStream{ .impl = self, .next_fn = supplyNext };
     }
 
     fn asProvider(self: *MockProvider, alloc: std.mem.Allocator) !*const agent.Provider {
@@ -106,7 +103,7 @@ const Fixture = struct {
         self.mock = MockProvider.init(alloc);
         errdefer self.mock.deinit();
         self.provider = try self.mock.asProvider(alloc);
-        errdefer self.allocator.destroy(self.provider);
+        errdefer alloc.destroy(self.provider);
         self.session = try agent.Session.init(id, self.provider);
     }
 
@@ -115,7 +112,6 @@ const Fixture = struct {
         alloc.destroy(self.provider);
         self.mock.deinit();
     }
-
 };
 
 test "session initializes" {
@@ -138,7 +134,7 @@ test "message added to the session is present in the history" {
     try session.appendMessage(alloc, "Hello, Agent!");
 
     try expect(session.messages.items).toHaveLength(1);
-    try expect(session.messages.items[0].userMessage.content).toEqual("Hello, Agent!");
+    try expect(session.messages.items[0].user.content).toEqual("Hello, Agent!");
 }
 
 test "run calls the provider once per run" {
@@ -150,7 +146,7 @@ test "run calls the provider once per run" {
 
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc);
-    
+
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try expect(f.mock.session).toEqual(Fixture.id);
     try expect(f.mock.model).toEqual(session.model.id());
@@ -170,8 +166,8 @@ test "run hands the provider the whole history in order" {
 
     try f.mock.stream_calls.toHaveBeenCalledTimes(1);
     try expect(f.mock.messages).toHaveLength(2);
-    try expect(f.mock.messages[0].userMessage.content).toEqual("first");
-    try expect(f.mock.messages[1].userMessage.content).toEqual("second");
+    try expect(f.mock.messages[0].user.content).toEqual("first");
+    try expect(f.mock.messages[1].user.content).toEqual("second");
     try expect(f.mock.tools).toBeEmpty();
 }
 
@@ -183,16 +179,16 @@ test "the mocked stream hands out the messages the test asked for" {
     const session = &f.session;
 
     try f.mock.returns(&.{
-        .{ .assistantMessage = .{ .content = "Hi!" } },
-        .{ .assistantMessage = .{ .content = "How can I help?" } },
+        .{ .assistant = .{ .content = "Hi!" } },
+        .{ .assistant = .{ .content = "How can I help?" } },
     });
 
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc);
 
-      try expect(session.messages.items).toHaveLength(3);
+    try expect(session.messages.items).toHaveLength(3);
     {
-          try expect(session.messages.items[1].assistantMessage.content).toBe("Hi!");
-          try expect(session.messages.items[2].assistantMessage.content).toBe("How can I help?");
+        try expect(session.messages.items[1].assistant.content).toBe("Hi!");
+        try expect(session.messages.items[2].assistant.content).toBe("How can I help?");
     }
 }
