@@ -73,7 +73,7 @@ const MockProvider = struct {
         self.messages = messages;
         self.tools = tools;
         self.session = session;
-        self.stream_calls.recordCall("stream") catch return error.ProviderError;
+        self.stream_calls.recordCall("stream") catch return error.Canceled;
         return self.stream_calls.getReturnValue() orelse MessageStream{ .impl = self, .next_fn = supplyNext };
     }
 

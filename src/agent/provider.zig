@@ -12,7 +12,7 @@ pub const ModelId = []const u8;
 pub const SystemPrompt = []const u8;
 
 pub const Provider = struct {
-    pub const Error = error{ProviderError} || std.Io.Cancelable;
+    pub const Error = error{ConnectionError} || std.Io.Cancelable || std.mem.Allocator.Error;
 
     pub const StreamFn = *const fn (
         impl: *anyopaque,
@@ -60,12 +60,12 @@ pub fn Stream(comptime t: type) type {
         const Self = @This();
         pub const Item = t;
 
-        pub const Error = error{Failed} || std.Io.Cancelable;
+        pub const Error = error{Failed} || std.Io.Cancelable || std.mem.Allocator.Error;
 
         pub const NextFn = *const fn (
             impl: *anyopaque,
             io: std.Io,
-        ) (Error || std.Io.Cancelable)!?Item;
+        ) Error!?Item;
 
         impl: *anyopaque,
         next_fn: NextFn,
