@@ -1,6 +1,7 @@
 const std = @import("std");
 const agent = @import("agent");
 const http = @import("http");
+const openai = @import("apis/openai.zig");
 
 const Stream = agent.Stream;
 
@@ -12,68 +13,6 @@ pub const Secret = struct {
 fn bearerToken(gpa: std.mem.Allocator, token: *const Secret) ![]const u8 {
     return try std.mem.concat(gpa, u8, &.{ "Bearer ", token.value });
 }
-
-const Generator = struct {
-    scope: std.mem.Allocator,
-    request: ?*http.Request,
-    parser: http.SseParser = .init,
-
-    fn init(allocator: std.mem.Allocator, request: *http.Request) !*Generator {
-        const gen = try allocator.create(Generator);
-        gen.* = .{ .scope = allocator, .request = request };
-        return gen;
-    }
-
-    fn next(impl: *anyopaque, _: std.Io) agent.Stream(agent.Message).Error!?agent.Message {
-        const self: *Generator = @ptrCast(@alignCast(impl));
-        const request = self.request orelse return null;
-        var buf: [4096]u8 = undefined;
-        var body = request.body();
-        while (true) {
-            const readBytes = body.read(&buf) catch {
-                self.finish();
-                return error.Failed;
-            };
-            if (readBytes == 0) {
-                self.finish();
-                return null;
-            }
-            self.parser.feed(self.scope, buf[0..readBytes]) catch |err| {
-                self.finish();
-                return err;
-            };
-            while (self.parser.take()) |event| {
-                switch (event.kind) {
-                    .reply => return agent.Message{ .assistant = .{ .content = event.data } },
-                    .error_reply => {
-                        self.finish();
-                        return error.Failed;
-                    },
-                    .done => {},
-                }
-            }
-        }
-    }
-
-    /// Release the response. The parser keeps the event payloads that the
-    /// caller received as message content.
-    fn finish(self: *Generator) void {
-        if (self.request) |request| request.deinit();
-        self.request = null;
-    }
-};
-
-const OpenAi = struct {
-    pub const Role = enum { system, user, assistant, tool, developer };
-
-    pub const Message = struct { role: Role, content: []const u8 };
-
-    pub const Create = struct {
-        model: []const u8,
-        stream: bool,
-        messages: []Message,
-    };
-};
 
 pub const OpencodeProvider = struct {
     pub const Endpoints = struct { models: []const u8 = "https://opencode.ai/zen/go/v1/models", go: []const u8 = "https://opencode.ai/zen/go/v1/chat/completions" };
@@ -107,18 +46,18 @@ pub const OpencodeProvider = struct {
         var payload: std.Io.Writer.Allocating = .init(scope.allocator());
         defer payload.deinit();
         {
-            var conversation_messages = try scope.allocator().alloc(OpenAi.Message, messages.len);
+            var conversation_messages = try scope.allocator().alloc(openai.Message, messages.len);
             for (messages, 0..) |message, i| {
                 switch (message) {
-                    .user => conversation_messages[i] = .{ .role = OpenAi.Role.user, .content = message.user.content },
-                    .assistant => conversation_messages[i] = .{ .role = OpenAi.Role.assistant, .content = message.assistant.content },
+                    .user => conversation_messages[i] = .{ .role = openai.Role.user, .content = message.user.content },
+                    .assistant => conversation_messages[i] = .{ .role = openai.Role.assistant, .content = message.assistant.content },
                 }
             }
-            const fmt = std.json.fmt(OpenAi.Create{
+            const fmt = std.json.fmt(openai.Create{
                 .model = model,
                 .stream = true,
-                .messages = try std.mem.concat(scope.allocator(), OpenAi.Message, &.{
-                    &.{.{ .role = OpenAi.Role.system, .content = system }},
+                .messages = try std.mem.concat(scope.allocator(), openai.Message, &.{
+                    &.{.{ .role = openai.Role.system, .content = system }},
                     conversation_messages,
                 }),
             }, .{});
@@ -140,6 +79,56 @@ pub const OpencodeProvider = struct {
         const generator = try Generator.init(self.transport.gpa, request);
         return .{ .impl = generator, .next_fn = Generator.next };
     }
+
+    const Generator = struct {
+        scope: std.mem.Allocator,
+        request: ?*http.Request,
+        parser: http.SseParser = .init,
+
+        fn init(allocator: std.mem.Allocator, request: *http.Request) !*Generator {
+            const gen = try allocator.create(Generator);
+            gen.* = .{ .scope = allocator, .request = request };
+            return gen;
+        }
+
+        fn next(impl: *anyopaque, _: std.Io) agent.Stream(agent.Message).Error!?agent.Message {
+            const self: *Generator = @ptrCast(@alignCast(impl));
+            const request = self.request orelse return null;
+            var buf: [4096]u8 = undefined;
+            var body = request.body();
+            while (true) {
+                const readBytes = body.read(&buf) catch {
+                    self.finish();
+                    return error.Failed;
+                };
+                if (readBytes == 0) {
+                    self.finish();
+                    return null;
+                }
+                self.parser.feed(self.scope, buf[0..readBytes]) catch |err| {
+                    self.finish();
+                    return err;
+                };
+                while (self.parser.take()) |event| {
+                    switch (event.kind) {
+                        .reply => return agent.Message{ .assistant = .{ .content = event.data } },
+                        .error_reply => {
+                            self.finish();
+                            return error.Failed;
+                        },
+                        .done => {},
+                    }
+                }
+            }
+        }
+
+        /// Release the response. The parser keeps the event payloads that the
+        /// caller received as message content.
+        fn finish(self: *Generator) void {
+            if (self.request) |request| request.deinit();
+            self.request = null;
+        }
+    };
 
     pub fn asProvider(self: *const OpencodeProvider) agent.Provider {
         return .{ .impl = &self, .table = .{

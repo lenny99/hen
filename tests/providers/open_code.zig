@@ -157,3 +157,43 @@ test "provider streams the reply from the wire" {
     try server.await(io);
     try std.testing.expectEqual(@as(usize, 1), server.recorder.items.len);
 }
+
+test "opencode parses a text delta event" {
+    const frame =
+        "{\"type\":\"response.output_text.delta\",\"sequence_number\":4," ++
+        "\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0," ++
+        "\"delta\":\"hello\"}\n";
+
+    var parsed = try provider.openai.parse(std.testing.allocator, frame);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("hello", parsed.value.textDelta().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.value.doneText());
+    try std.testing.expect(!parsed.value.isFinal());
+}
+
+test "opencode parses a completed event" {
+    const frame =
+        "{\"type\":\"response.completed\",\"sequence_number\":9," ++
+        "\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-6-astra\",\"status\":\"completed\"," ++
+        "\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n";
+
+    var parsed = try provider.openai.parse(std.testing.allocator, frame);
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.isFinal());
+    try std.testing.expectEqualStrings("gpt-6-astra", parsed.value.response.?.model.?);
+    try std.testing.expectEqual(@as(?u64, 4), parsed.value.response.?.usage.?.total_tokens);
+}
+
+test "opencode parses an error event" {
+    const frame =
+        "{\"type\":\"error\",\"code\":\"server_error\",\"message\":\"boom\"," ++
+        "\"param\":null,\"sequence_number\":2}\n";
+
+    var parsed = try provider.openai.parse(std.testing.allocator, frame);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("boom", parsed.value.errorMessage().?);
+    try std.testing.expect(parsed.value.isFinal());
+}
