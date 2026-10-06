@@ -5,23 +5,18 @@ const openai = @import("apis/openai.zig");
 
 const Stream = agent.Stream;
 
-pub const Secret = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-fn bearerToken(gpa: std.mem.Allocator, token: *const Secret) ![]const u8 {
+fn bearerToken(gpa: std.mem.Allocator, token: *const agent.Secret) ![]const u8 {
     return try std.mem.concat(gpa, u8, &.{ "Bearer ", token.value });
 }
 
 pub const OpencodeProvider = struct {
     pub const Endpoints = struct { models: []const u8 = "https://opencode.ai/zen/go/v1/models", go: []const u8 = "https://opencode.ai/zen/go/v1/chat/completions" };
 
-    token: *const Secret,
+    token: *const agent.Secret,
     transport: *http.Transport,
     endpoints: Endpoints = .{},
 
-    pub fn init(alloc: std.mem.Allocator, transport: *http.Transport, token: *const Secret) !*OpencodeProvider {
+    pub fn init(alloc: std.mem.Allocator, transport: *http.Transport, token: *const agent.Secret) !*OpencodeProvider {
         const self = try alloc.create(OpencodeProvider);
         self.* = .{ .token = token, .transport = transport };
         return self;

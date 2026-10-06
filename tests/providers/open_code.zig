@@ -13,7 +13,7 @@ test "opencode provider initializes" {
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
 
-    const token = provider.Secret{ .name = "opencode", .value = "test-token" };
+    const token = agent.Secret{ .name = "opencode", .value = "test-token" };
     var opencode = try OpencodeProvider.init(gpa, &transport, &token);
     defer opencode.deinit(gpa);
 }
@@ -136,7 +136,7 @@ test "provider streams the reply from the wire" {
     try server.responses.pushBack(std.testing.allocator, "data: {\"assistant\":{\"content\":\"hello from fake wire\"}}\n\n");
     try server.spawn(io, std.testing.allocator);
 
-    const token = provider.Secret{ .name = "opencode", .value = "test-token" };
+    const token = agent.Secret{ .name = "opencode", .value = "test-token" };
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
     var opencode = try OpencodeProvider.init(gpa, &transport, &token);
