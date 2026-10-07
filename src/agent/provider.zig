@@ -1,12 +1,14 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
-const message_mod = @import("message.zig");
+const msg = @import("message.zig");
 
-const Message = message_mod.Message;
+const Message = msg.Message;
+const Delta = msg.Delta;
+
 const session_mod = @import("session.zig");
 const Session = session_mod.Session;
-pub const Tool = session_mod.Tool;
+pub const ToolDef = session_mod.ToolDef;
 
 pub const ModelId = []const u8;
 pub const SystemPrompt = []const u8;
@@ -14,44 +16,49 @@ pub const SystemPrompt = []const u8;
 pub const Provider = struct {
     pub const Error = error{ConnectionError} || std.Io.Cancelable || std.mem.Allocator.Error;
 
-    pub const StreamFn = *const fn (
-        impl: *anyopaque,
-        io: std.Io,
+    pub const SessionArgs = struct {
         model: ModelId,
         system: SystemPrompt,
         messages: []const Message,
-        tools: []const Tool,
+        tools: []const ToolDef,
         session: uuid.UUID,
-    ) Error!Stream(Message);
+    };
+
+    pub const StreamFn = *const fn (impl: *anyopaque, args: SessionArgs) Error!DeltaStream;
+
+    pub const MessageFn = *const fn (impl: *anyopaque, args: SessionArgs) Error!MessageStream;
 
     pub const CancelFn = *const fn (impl: *anyopaque, io: std.Io) Error!void;
 
+    pub const MessageStream = Stream(Message);
+    pub const DeltaStream = Stream(Delta);
+
     impl: *anyopaque,
-    table: struct {
+    vtable: struct {
         stream: StreamFn,
+        messages: MessageFn,
     },
 
-    pub fn init(impl: *anyopaque, stream_fn: StreamFn) Provider {
+    pub fn init(impl: *anyopaque, stream_fn: StreamFn, message_fn: MessageFn) Provider {
         return .{
             .impl = impl,
-            .table = .{ .stream = stream_fn },
+            .vtable = .{
+                .stream = stream_fn,
+                .messages = message_fn,
+            },
         };
     }
 
-    pub fn stream(
-        self: Provider,
-        io: std.Io,
-        model: ModelId,
-        system: SystemPrompt,
-        messages: []const Message,
-        tools: []const Tool,
-        session: Session.Id,
-    ) Error!Stream(Message) {
-        return self.table.stream(self.impl, io, model, system, messages, tools, session);
+    pub fn stream(self: Provider, args: SessionArgs) Error!Stream(Delta) {
+        return self.vtable.stream(self.impl, args);
+    }
+
+    pub fn messages(self: Provider, args: SessionArgs) Error!Stream(Message) {
+        return self.vtable.messages(self.impl, args);
     }
 
     pub fn close(self: Provider, io: std.Io) Error!void {
-        return self.table.close(self.impl, io);
+        return self.vtable.close(self.impl, io);
     }
 };
 
@@ -60,7 +67,7 @@ pub fn Stream(comptime t: type) type {
         const Self = @This();
         pub const Item = t;
 
-        pub const Error = error{Failed} || std.Io.Cancelable || std.mem.Allocator.Error;
+        pub const Error = error{Failed, ResponseError} || std.Io.Cancelable || std.mem.Allocator.Error;
 
         pub const NextFn = *const fn (
             impl: *anyopaque,

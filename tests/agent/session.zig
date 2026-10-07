@@ -2,9 +2,6 @@ const std = @import("std");
 const agent = @import("agent");
 const ztf = @import("zig_test_framework");
 
-const Message = agent.Message;
-const MessageStream = agent.Stream(Message);
-
 /// `ztf.expect` asks for an allocator, but it never uses it. The matchers only
 /// call `std.debug.print`. Keep that argument out of the tests with this
 /// helper. It still passes `std.testing.allocator`, so a leak inside the
@@ -16,70 +13,65 @@ inline fn expect(actual: anytype) @TypeOf(ztf.expect(std.testing.allocator, actu
 const MockProvider = struct {
     const Error = agent.Provider.Error;
 
-    /// The framework mock records every call to `stream`.
-    stream_calls: ztf.Mock(MessageStream),
-
-    model: agent.ModelId = "",
-    system: agent.SystemPrompt = "",
-    session: agent.Session.Id = .nil,
-
-    /// The framework keeps call arguments as text, so the typed history goes
-    /// in these two fields.
-    messages: []const Message = &.{},
-    tools: []const agent.Tool = &.{},
     allocator: std.mem.Allocator,
-
-    /// The messages the mocked stream hands out, in order. After the last
-    /// one the stream ends, and `next` returns null.
-    replies: std.ArrayList(Message) = .empty,
+    /// The framework mocks record every call to the provider functions, so the
+    /// tests can count the calls.
+    mocks: struct {
+        stream: ztf.Mock(agent.Provider.DeltaStream),
+        messages: ztf.Mock(agent.Provider.MessageStream),
+    },
+    /// The arguments of the last call. The framework mock stores call
+    /// arguments as text, so the typed values go here.
+    call: ?agent.Provider.SessionArgs = null,
+    /// The messages the message stream hands out, in order. After the last one
+    /// the stream ends, and `next` returns null.
+    replies: std.ArrayList(agent.Message) = .empty,
 
     fn init(alloc: std.mem.Allocator) MockProvider {
         return .{
             .allocator = alloc,
-            .stream_calls = ztf.Mock(MessageStream).init(alloc),
+            .mocks = .{
+                .stream = ztf.Mock(agent.Provider.DeltaStream).init(alloc),
+                .messages = ztf.Mock(agent.Provider.MessageStream).init(alloc),
+            },
         };
     }
 
     fn deinit(self: *MockProvider) void {
         self.replies.deinit(self.allocator);
-        self.stream_calls.deinit();
+        self.mocks.stream.deinit();
+        self.mocks.messages.deinit();
     }
 
-    fn supplyNext(impl: *anyopaque, io: std.Io) MessageStream.Error!?Message {
-        _ = io;
+    /// Make the message stream hand out these messages, in order.
+    fn returns(self: *MockProvider, replies: []const agent.Message) !void {
+        self.replies.clearRetainingCapacity();
+        try self.replies.appendSlice(self.allocator, replies);
+    }
+
+    fn supplyNext(impl: *anyopaque, _: std.Io) agent.Provider.MessageStream.Error!?agent.Message {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
         if (self.replies.items.len == 0) return null;
         return self.replies.orderedRemove(0);
     }
 
-    /// Make the stream hand out these messages, in order.
-    fn returns(self: *MockProvider, messages: []const Message) !void {
-        self.replies.clearRetainingCapacity();
-        try self.replies.appendSlice(self.allocator, messages);
+    fn stream(impl: *anyopaque, args: agent.Provider.SessionArgs) Error!agent.Provider.DeltaStream {
+        const self: *MockProvider = @ptrCast(@alignCast(impl));
+        self.call = args;
+        self.mocks.stream.recordCall("stream") catch return error.Canceled;
+        return self.mocks.stream.getReturnValue() orelse unreachable;
     }
 
-    fn stream(
-        impl: *anyopaque,
-        _: std.Io,
-        model: agent.ModelId,
-        system: agent.SystemPrompt,
-        messages: []const Message,
-        tools: []const agent.Tool,
-        session: agent.Session.Id,
-    ) Error!MessageStream {
+    fn messages(impl: *anyopaque, args: agent.Provider.SessionArgs) Error!agent.Provider.MessageStream {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
-        self.model = model;
-        self.system = system;
-        self.messages = messages;
-        self.tools = tools;
-        self.session = session;
-        self.stream_calls.recordCall("stream") catch return error.Canceled;
-        return self.stream_calls.getReturnValue() orelse MessageStream{ .impl = self, .next_fn = supplyNext };
+        self.call = args;
+        self.mocks.messages.recordCall("messages") catch return error.Canceled;
+        return self.mocks.messages.getReturnValue() orelse .{ .impl = self, .next_fn = supplyNext };
     }
 
     fn asProvider(self: *MockProvider, alloc: std.mem.Allocator) !*const agent.Provider {
         const ref = try alloc.create(agent.Provider);
-        ref.* = agent.Provider.init(self, stream);
+        ref.* = agent.Provider.init(self, stream, messages);
         return ref;
     }
 };
@@ -147,10 +139,11 @@ test "run calls the provider once per run" {
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc);
 
-    try f.mock.stream_calls.toHaveBeenCalledTimes(1);
-    try expect(f.mock.session).toEqual(Fixture.id);
-    try expect(f.mock.model).toEqual(session.model.id());
-    try expect(f.mock.system).toEqual(session.system);
+    try f.mock.mocks.messages.toHaveBeenCalledTimes(1);
+    const call = f.mock.call.?;
+    try expect(call.session).toEqual(Fixture.id);
+    try expect(call.model).toEqual(session.model.id());
+    try expect(call.system).toEqual(session.system);
 }
 
 test "run hands the provider the whole history in order" {
@@ -164,11 +157,12 @@ test "run hands the provider the whole history in order" {
     try session.appendMessage(alloc, "second");
     try session.run(std.testing.io, alloc);
 
-    try f.mock.stream_calls.toHaveBeenCalledTimes(1);
-    try expect(f.mock.messages).toHaveLength(2);
-    try expect(f.mock.messages[0].user.content).toEqual("first");
-    try expect(f.mock.messages[1].user.content).toEqual("second");
-    try expect(f.mock.tools).toBeEmpty();
+    try f.mock.mocks.messages.toHaveBeenCalledTimes(1);
+    const call = f.mock.call.?;
+    try expect(call.messages).toHaveLength(2);
+    try expect(call.messages[0].user.content).toEqual("first");
+    try expect(call.messages[1].user.content).toEqual("second");
+    try expect(call.tools).toBeEmpty();
 }
 
 test "the mocked stream hands out the messages the test asked for" {
@@ -187,8 +181,6 @@ test "the mocked stream hands out the messages the test asked for" {
     try session.run(std.testing.io, alloc);
 
     try expect(session.messages.items).toHaveLength(3);
-    {
-        try expect(session.messages.items[1].assistant.content).toBe("Hi!");
-        try expect(session.messages.items[2].assistant.content).toBe("How can I help?");
-    }
+    try expect(session.messages.items[1].assistant.content).toBe("Hi!");
+    try expect(session.messages.items[2].assistant.content).toBe("How can I help?");
 }

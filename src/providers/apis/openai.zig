@@ -59,35 +59,71 @@ pub const Response = struct {
     response: ?Body = null,
     item: ?OutputItem = null,
 
-    /// The text fragment of a `response.output_text.delta` event.
-    pub fn textDelta(self: *const Response) ?[]const u8 {
-        if (!std.mem.eql(u8, self.type, "response.output_text.delta")) return null;
-        return self.delta;
-    }
+    /// The meaning of one streamed response object. Payload fields point
+    /// into `self` and stay valid as long as the parsed response does.
+    pub const Kind = union(enum) {
+        /// A fragment of streamed assistant text
+        /// (`response.output_text.delta`).
+        text_delta: []const u8,
+        /// The complete assistant text of an item
+        /// (`response.output_text.done`).
+        text_done: []const u8,
+        /// A fragment of streamed function call arguments
+        /// (`response.function_call_arguments.delta`).
+        arguments_delta: []const u8,
+        /// The complete function call arguments of an item
+        /// (`response.function_call_arguments.done`).
+        arguments_done: []const u8,
+        /// A finished output item (`response.output_item.done`).
+        item: *const OutputItem,
+        /// The final response body (`response.completed`).
+        completed: *const Body,
+        /// The response body of a stream that ended early
+        /// (`response.incomplete`).
+        incomplete: *const Body,
+        /// The response body of a failed response (`response.failed`).
+        failed: *const Body,
+        /// An `error` event. The payload is the error message.
+        error_message: []const u8,
+        /// An event that carries no meaning for this provider.
+        other,
+    };
 
-    /// The finished text of a `response.output_text.done` event.
-    pub fn doneText(self: *const Response) ?[]const u8 {
-        if (!std.mem.eql(u8, self.type, "response.output_text.done")) return null;
-        return self.text;
-    }
-
-    /// The message of an `error` event or of a failed response.
-    pub fn errorMessage(self: *const Response) ?[]const u8 {
-        if (std.mem.eql(u8, self.type, "error")) return self.message;
-        if (std.mem.eql(u8, self.type, "response.failed")) {
-            const body = self.response orelse return null;
-            const failure = body.@"error" orelse return null;
-            return failure.message;
+    /// Classify the response object.
+    pub fn kind(self: *const Response) Kind {
+        const t = self.type;
+        if (std.mem.eql(u8, t, "response.output_text.delta")) {
+            return .{ .text_delta = self.delta orelse "" };
         }
-        return null;
-    }
-
-    /// True for the events that end the stream.
-    pub fn isFinal(self: *const Response) bool {
-        return std.mem.eql(u8, self.type, "response.completed") or
-            std.mem.eql(u8, self.type, "response.incomplete") or
-            std.mem.eql(u8, self.type, "response.failed") or
-            std.mem.eql(u8, self.type, "error");
+        if (std.mem.eql(u8, t, "response.output_text.done")) {
+            return .{ .text_done = self.text orelse "" };
+        }
+        if (std.mem.eql(u8, t, "response.function_call_arguments.delta")) {
+            return .{ .arguments_delta = self.arguments orelse "" };
+        }
+        if (std.mem.eql(u8, t, "response.function_call_arguments.done")) {
+            return .{ .arguments_done = self.arguments orelse "" };
+        }
+        if (std.mem.eql(u8, t, "response.output_item.done")) {
+            if (self.item) |*item| return .{ .item = item };
+            return .other;
+        }
+        if (std.mem.eql(u8, t, "response.completed")) {
+            if (self.response) |*body| return .{ .completed = body };
+            return .other;
+        }
+        if (std.mem.eql(u8, t, "response.incomplete")) {
+            if (self.response) |*body| return .{ .incomplete = body };
+            return .other;
+        }
+        if (std.mem.eql(u8, t, "response.failed")) {
+            if (self.response) |*body| return .{ .failed = body };
+            return .other;
+        }
+        if (std.mem.eql(u8, t, "error")) {
+            return .{ .error_message = self.message orelse "" };
+        }
+        return .other;
     }
 };
 

@@ -4,13 +4,17 @@ const http = @import("http");
 const openai = @import("apis/openai.zig");
 
 const Stream = agent.Stream;
+const Provider = agent.Provider;
 
 fn bearerToken(gpa: std.mem.Allocator, token: *const agent.Secret) ![]const u8 {
     return try std.mem.concat(gpa, u8, &.{ "Bearer ", token.value });
 }
 
 pub const OpencodeProvider = struct {
-    pub const Endpoints = struct { models: []const u8 = "https://opencode.ai/zen/go/v1/models", go: []const u8 = "https://opencode.ai/zen/go/v1/chat/completions" };
+    pub const Endpoints = struct { 
+        models: []const u8 = "https://opencode.ai/zen/go/v1/models", 
+        go: []const u8 = "https://opencode.ai/zen/go/v1/chat/completions" ,
+    };
 
     token: *const agent.Secret,
     transport: *http.Transport,
@@ -34,7 +38,7 @@ pub const OpencodeProvider = struct {
         messages: []const agent.Message,
         _: []const agent.Tool,
         session: agent.Session.Id,
-    ) agent.Provider.Error!Stream(agent.Message) {
+    ) Provider.Error!Provider.DeltaStream {
         var scope: std.heap.ArenaAllocator = .init(self.transport.gpa);
         defer scope.deinit();
 
@@ -86,7 +90,7 @@ pub const OpencodeProvider = struct {
             return gen;
         }
 
-        fn next(impl: *anyopaque, _: std.Io) agent.Stream(agent.Message).Error!?agent.Message {
+        fn next(impl: *anyopaque, _: std.Io) Provider.DeltaStream.Error!?agent.Delta {
             const self: *Generator = @ptrCast(@alignCast(impl));
             const request = self.request orelse return null;
             var buf: [4096]u8 = undefined;
@@ -106,7 +110,31 @@ pub const OpencodeProvider = struct {
                 };
                 while (self.parser.take()) |event| {
                     switch (event.kind) {
-                        .reply => return agent.Message{ .assistant = .{ .content = event.data } },
+                        .reply => {
+                            // TODO: message ordering is currently ignored, messages come in out of order
+                            const parsed = openai.parse(self.scope, event.data) catch return error.ResponseError;
+                            const kind = parsed.value.kind();
+                            switch (kind) {
+                                .text_delta => |delta| return agent.Delta{ .delta = delta },
+                                // The complete assistant text of an item
+                                // (`response.output_text.done`).
+                                .text_done => |done| return agent.Delta{ .done = done },
+                                // A fragment of streamed function call arguments
+                                // (`response.function_call_arguments.delta`).
+                                .arguments_delta => |args| {
+                                    _ = self.collectToolCall(args);
+                                },
+                                // The complete function call arguments of an item
+                                // (`response.function_call_arguments.done`).
+                                .arguments_done => return agent.Delta{ .tool_invocation = undefined }, // TODO:
+                                // A finished output item (`response.output_item.done`).
+                                .item => return agent.Delta{ .tool_return = undefined }, // TODO:
+                                // The final response body (`response.completed`).
+                                .completed, .incomplete, .failed => |response_body| return try toLifecycle(kind, response_body),
+                                .error_message => |err| return agent.Delta{ .@"error" = err },
+                                .other => {},
+                            }
+                        },
                         .error_reply => {
                             self.finish();
                             return error.Failed;
@@ -115,6 +143,10 @@ pub const OpencodeProvider = struct {
                     }
                 }
             }
+        }
+
+        fn collectToolCall(_: *Generator, _: []const u8 ) agent.Tool.Invocation {
+            return .{};
         }
 
         /// Release the response. The parser keeps the event payloads that the
@@ -131,3 +163,17 @@ pub const OpencodeProvider = struct {
         } };
     }
 };
+
+fn toToolReturn(_: openai.Response.OutputItem) !agent.Delta {
+    return .{ .tool_return = .{} };
+}
+
+fn toLifecycle(kind: openai.Response.Kind, body: *const openai.Response.Body) !agent.Delta {
+    const lifecycle_status: agent.Lifecycle.Status = switch (kind) {
+        .completed => .completed,
+        .incomplete => .incomplete,
+        .failed => .failed,
+        else => unreachable,
+    };
+    return .{ .lifecycle = .{ .id = body.id, .kind = lifecycle_status } };
+}

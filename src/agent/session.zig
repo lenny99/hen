@@ -20,7 +20,7 @@ pub const Model = struct {
 
 const glm51 = Model{ .provider = "opencode", .name = "glm-5.3-flash", .context = 300.000 };
 
-pub const Tool = struct {
+pub const ToolDef = struct {
     pub const Error = error{ToolFailed} || std.Io.Cancelable;
 
     /// The agent loop runs calls to this tool one at a time, or all at once.
@@ -79,7 +79,7 @@ pub const Tool = struct {
     render_result: ?RenderResultFn = null,
 
     /// The name for provider payload builders. The same value as `parameters`.
-    pub fn inputSchema(self: *const Tool) std.json.Value {
+    pub fn inputSchema(self: *const ToolDef) std.json.Value {
         return self.parameters;
     }
 };
@@ -93,7 +93,7 @@ pub const Session = struct {
 
     system: SystemPrompt,
     messages: std.ArrayList(Message),
-    tools: std.ArrayList(Tool),
+    tools: std.ArrayList(ToolDef),
 
     pub fn init(id: Id, provider: *const Provider) !Session {
         return .{
@@ -113,7 +113,13 @@ pub const Session = struct {
     }
 
     pub fn run(self: *Session, io: std.Io, alloc: std.mem.Allocator) !void {
-        var stream = try self.provider.stream(io, self.model.id(), self.system, self.messages.items, self.tools.items, self.id);
+        var stream = try self.provider.messages(Provider.SessionArgs{
+            .model = self.model.id(),
+            .system = self.system,
+            .messages = self.messages.items,
+            .tools = self.tools.items,
+            .session = self.id,
+        });
         while (try stream.next(io)) |message| {
             try self.messages.append(alloc, message);
         }
