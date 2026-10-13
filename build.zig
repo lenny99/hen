@@ -72,7 +72,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "agent", .module = agent_module },
-                .{ .name = "provider", .module = provider_module }
+                .{ .name = "http", .module = http_module },
+                .{ .name = "provider", .module = provider_module },
+                .{ .name = "uuid", .module = uuid.module("uuid") },
             },
         }),
     });
