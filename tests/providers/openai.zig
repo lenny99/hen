@@ -135,44 +135,52 @@ test "openai classifies an unmodelled event" {
 }
 
 test "openai parses a chat completions keepalive chunk" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     const frame =
         "{\"id\":\"chatcmpl-9rXvcQMDINztJYKDFUVkav7rxxQNr\",\"object\":\"chat.completion.chunk\"," ++
         "\"created\":1791901445,\"model\":\"glm-5.3-flash\",\"choices\":[{\"index\":0," ++
         "\"finish_reason\":null,\"logprobs\":null,\"delta\":{\"role\":\"assistant\"," ++
         "\"content\":\"\",\"refusal\":null}}],\"usage\":null}\n";
 
-    var parsed = try openai.parseChunk(std.testing.allocator, frame);
-    defer parsed.deinit();
+    const chunk = try openai.parseChunkLeaky(arena.allocator(), frame);
 
-    try std.testing.expectEqualStrings("chatcmpl-9rXvcQMDINztJYKDFUVkav7rxxQNr", parsed.value.id.?);
-    try std.testing.expect(parsed.value.text() == null);
-    try std.testing.expect(parsed.value.finishReason() == null);
+    try std.testing.expectEqualStrings("chatcmpl-9rXvcQMDINztJYKDFUVkav7rxxQNr", chunk.id.?);
+    try std.testing.expect(chunk.text() == null);
+    try std.testing.expect(chunk.finishReason() == null);
 }
 
 test "openai parses a chat completions text chunk" {
-    var parsed = try openai.parseChunk(std.testing.allocator,
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const chunk = try openai.parseChunkLeaky(arena.allocator(),
         "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n");
-    defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("hello", parsed.value.text().?);
-    try std.testing.expect(parsed.value.finishReason() == null);
+    try std.testing.expectEqualStrings("hello", chunk.text().?);
+    try std.testing.expect(chunk.finishReason() == null);
 }
 
 test "openai parses a chat completions finish chunk" {
-    var parsed = try openai.parseChunk(std.testing.allocator,
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const chunk = try openai.parseChunkLeaky(arena.allocator(),
         "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n");
-    defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("stop", parsed.value.finishReason().?);
-    try std.testing.expect(parsed.value.text() == null);
+    try std.testing.expectEqualStrings("stop", chunk.finishReason().?);
+    try std.testing.expect(chunk.text() == null);
 }
 
 test "openai parses a chat completions error chunk" {
-    var parsed = try openai.parseChunk(std.testing.allocator,
-        "{\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"server_error\"}}\n");
-    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    try std.testing.expectEqualStrings("boom", parsed.value.@"error".?.message.?);
+    const chunk = try openai.parseChunkLeaky(arena.allocator(),
+        "{\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"server_error\"}}\n");
+
+    try std.testing.expectEqualStrings("boom", chunk.@"error".?.message.?);
 }

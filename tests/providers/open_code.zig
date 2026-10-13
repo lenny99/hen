@@ -166,7 +166,6 @@ test "provider streams the reply from the wire" {
     defer stream.deinit(io);
 
     const reply = (try stream.next(io)) orelse return error.MissingReply;
-    try std.testing.expectEqualStrings("hello from fake wire", reply.delta);
 
     const end = (try stream.next(io)) orelse return error.MissingReply;
     switch (end) {
@@ -175,6 +174,8 @@ test "provider streams the reply from the wire" {
     }
 
     try std.testing.expectEqual(@as(?agent.Delta, null), try stream.next(io));
+
+    try std.testing.expectEqualStrings("hello from fake wire", reply.delta);
 
     try server.await(io);
     try std.testing.expectEqual(@as(usize, 1), server.recorder.items.len);

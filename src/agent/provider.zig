@@ -62,8 +62,7 @@ pub fn Stream(comptime t: type) type {
         deinit_fn: DeinitFn,
 
         /// Advance the stream. `null` ends it. The item is owned by the stream
-        /// and stays valid until the next call to `next` or to `deinit`; copy
-        /// anything that must outlive it.
+        /// and stays valid until `deinit`; copy anything that must outlive it.
         pub fn next(self: Self, io: std.Io) Error!?Item {
             return self.next_fn(self.impl, io);
         }

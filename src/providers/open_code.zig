@@ -30,8 +30,10 @@ pub const OpencodeProvider = struct {
         allocator.destroy(self);
     }
 
-    /// Open one streamed response. The stream owns the connection and the
-    /// arena behind the items it hands out; `Stream.deinit` releases both.
+    /// Open one streamed response. A single arena holds everything the stream
+    /// needs: the payload, the headers, the request, the body buffer, the SSE
+    /// parser, and every item handed out. `Stream.deinit` drops it in one step,
+    /// so no piece of the request is freed on its own.
     pub fn stream(self: *const OpencodeProvider, args: Provider.SessionArgs) Provider.Error!Provider.DeltaStream {
         const gpa = self.transport.gpa;
 
@@ -42,13 +44,13 @@ pub const OpencodeProvider = struct {
             gpa.destroy(arena);
         }
 
-        const scratch = arena.allocator();
+        const alloc = arena.allocator();
 
-        const body = buildPayload(scratch, args) catch return error.ConnectionError;
-        const authorization = bearerToken(scratch, self.token) catch return error.ConnectionError;
-        const session_id = args.session.toString(scratch) catch return error.ConnectionError;
+        const body = buildPayload(alloc, args) catch return error.ConnectionError;
+        const authorization = bearerToken(alloc, self.token) catch return error.ConnectionError;
+        const session_id = args.session.toString(alloc) catch return error.ConnectionError;
 
-        const request = http.Request.open(self.transport, .{
+        const request = http.Request.open(self.transport, alloc, .{
             .url = self.endpoints.go,
             .headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
@@ -61,8 +63,8 @@ pub const OpencodeProvider = struct {
 
         if (request.status().class() != .success) return error.ConnectionError;
 
-        const generator = try Generator.init(gpa, arena);
-        generator.request = request;
+        const generator = try alloc.create(Generator);
+        generator.* = .{ .arena = arena, .request = request };
 
         return .{ .impl = generator, .next_fn = Generator.next, .deinit_fn = Generator.deinit };
     }
@@ -94,57 +96,38 @@ pub const OpencodeProvider = struct {
     }
 
     const Generator = struct {
-        gpa: std.mem.Allocator,
+        /// Owns the request, the body buffer, the parser, and every item handed
+        /// out; `deinit` drops all of it at once.
         arena: *std.heap.ArenaAllocator,
-        request: ?*http.Request = null,
+        request: *http.Request,
         parser: http.SseParser = .init,
 
-        fn init(gpa: std.mem.Allocator, arena: *std.heap.ArenaAllocator) !*Generator {
-            const generator = try gpa.create(Generator);
-            generator.* = .{ .gpa = gpa, .arena = arena };
-            return generator;
-        }
-
-        /// Close the stream and release everything it owns: the response, the
-        /// parser, the item arena, and the generator itself.
+        /// Close the stream: release the connection, then drop the arena.
         fn deinit(impl: *anyopaque, _: std.Io) void {
             const self: *Generator = @ptrCast(@alignCast(impl));
-            if (self.request) |request| request.deinit();
-            self.parser.deinit(self.gpa);
-            const gpa = self.gpa;
             const arena = self.arena;
-            gpa.destroy(self);
+            const gpa = arena.child_allocator;
+            self.request.deinit();
             arena.deinit();
             gpa.destroy(arena);
         }
 
         fn next(impl: *anyopaque, _: std.Io) Provider.DeltaStream.Error!?agent.Delta {
             const self: *Generator = @ptrCast(@alignCast(impl));
-            const request = self.request orelse return null;
-
-            // Whatever the previous call handed out is dead now: an item lives
-            // until the next call.
-            _ = self.arena.reset(.retain_capacity);
             const alloc = self.arena.allocator();
 
             var buf: [4096]u8 = undefined;
-            var body = request.body();
+            var body = self.request.body();
             while (true) {
                 while (self.parser.take()) |event| {
-                    defer {
-                        self.gpa.free(event.data);
-                        self.gpa.free(event.extra);
-                    }
-
                     switch (event.kind) {
                         .reply => {
-                            const parsed = openai.parseChunk(alloc, event.data) catch |err| {
+                            const chunk = openai.parseChunkLeaky(alloc, event.data) catch |err| {
                                 // TODO: temporary debug. Dump the raw reply when it
                                 // does not parse, to see what opencode really sends.
                                 std.debug.print("[hen] opencode reply parse failed ({t}): {s}\n", .{ err, event.data });
                                 return error.ResponseError;
                             };
-                            const chunk = parsed.value;
 
                             if (chunk.@"error") |failure| {
                                 return agent.Delta{ .@"error" = failure.message orelse "provider error" };
@@ -167,7 +150,7 @@ pub const OpencodeProvider = struct {
                 const read_bytes = body.read(&buf) catch return error.Failed;
                 if (read_bytes == 0) return null;
 
-                self.parser.feed(self.gpa, buf[0..read_bytes]) catch return error.Failed;
+                self.parser.feed(alloc, buf[0..read_bytes]) catch return error.Failed;
             }
         }
     };

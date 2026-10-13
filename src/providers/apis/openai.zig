@@ -202,11 +202,13 @@ pub const Chunk = struct {
     }
 };
 
-/// Parse one SSE `data` payload into a Chat Completions chunk. See `parse` for
-/// the ownership and allocator rules.
-pub fn parseChunk(allocator: std.mem.Allocator, data: []const u8) !std.json.Parsed(Chunk) {
-    return std.json.parseFromSlice(Chunk, allocator, data, .{
+/// Parse one SSE `data` payload into a Chat Completions chunk, allocating into
+/// `allocator` only what the value needs. The returned strings alias `data`, so
+/// `data` must stay alive for as long as the chunk is read, which the stream
+/// arena guarantees: every payload lives until `Stream.deinit`.
+pub fn parseChunkLeaky(allocator: std.mem.Allocator, data: []const u8) !Chunk {
+    return std.json.parseFromSliceLeaky(Chunk, allocator, data, .{
         .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
+        .allocate = .alloc_if_needed,
     });
 }

@@ -61,12 +61,14 @@ fn environment(gpa: std.mem.Allocator) !std.process.Environ.Map {
     return map;
 }
 
-/// One in-flight request. Owns the connection and the body buffer.
+/// One in-flight request. Owns the connection; every allocation comes from
+/// the allocator given to `open`, so a stream arena reclaims the whole
+/// request in one drop.
 ///
 /// `open` returns a pointer so that the response head and the body reader
 /// keep pointing at a stable address.
 pub const Request = struct {
-    gpa: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     inner: std.http.Client.Request,
     response: std.http.Client.Response,
     /// The response body reader, borrowed from `response`.
@@ -80,14 +82,13 @@ pub const Request = struct {
         payload: []const u8,
     };
 
-    /// Send one POST request and read the response head.
-    /// The caller owns the result and must call `deinit`.
-    pub fn open(transport: *Transport, options: Options) !*Request {
-        const gpa = transport.gpa;
+    /// Send one POST request and read the response head. The caller owns the
+    /// result and must call `deinit`.
+    pub fn open(transport: *Transport, allocator: std.mem.Allocator, options: Options) !*Request {
         const uri = try std.Uri.parse(options.url);
 
-        const self = try gpa.create(Request);
-        errdefer gpa.destroy(self);
+        const self = try allocator.create(Request);
+        errdefer allocator.destroy(self);
 
         self.inner = try transport.client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
@@ -98,10 +99,10 @@ pub const Request = struct {
         try self.inner.sendBodyComplete(@constCast(options.payload));
         self.response = try self.inner.receiveHead(&.{});
 
-        self.transfer_buffer = try gpa.alloc(u8, transfer_buffer_len);
-        errdefer gpa.free(self.transfer_buffer);
+        self.transfer_buffer = try allocator.alloc(u8, transfer_buffer_len);
+        errdefer allocator.free(self.transfer_buffer);
         self.reader = self.response.reader(self.transfer_buffer);
-        self.gpa = gpa;
+        self.allocator = allocator;
         return self;
     }
 
@@ -114,10 +115,13 @@ pub const Request = struct {
         return .{ .reader = self.reader };
     }
 
+    /// Release the connection and hand the request's memory back to the
+    /// allocator given to `open`. An arena makes that reclaim wholesale and the
+    /// frees below no-ops.
     pub fn deinit(self: *Request) void {
         self.inner.deinit();
-        self.gpa.free(self.transfer_buffer);
-        self.gpa.destroy(self);
+        self.allocator.free(self.transfer_buffer);
+        self.allocator.destroy(self);
     }
 };
 
