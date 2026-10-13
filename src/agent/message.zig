@@ -10,8 +10,22 @@ pub const Message = union(enum) {
 };
 
 pub const Tool = struct {
-    pub const Invocation = struct {};
-    pub const Output = struct {};
+    /// One tool call as the provider assembled it from its streamed deltas.
+    pub const Invocation = struct {
+        /// The provider's id for the call. Stable across the call's deltas, and
+        /// the value a tool result is matched against.
+        id: []const u8,
+        name: []const u8,
+        /// The call arguments as the provider sent them: raw JSON text.
+        arguments: []const u8,
+    };
+
+    /// One tool result to hand back to the provider.
+    pub const Output = struct {
+        /// The id of the invocation this answers.
+        id: []const u8,
+        content: []const u8,
+    };
 };
 
 pub const Tokens = u64;
@@ -27,7 +41,7 @@ pub const Lifecycle = struct {
     status: ?[]const u8 = null,
     @"error": ?[]const u8 = null,
     usage: ?Usage = null,
-    output: ?[]const Tool.Output = null,
+    output: ?Tool.Output = null,
 };
 
 pub const Delta = union(enum) {

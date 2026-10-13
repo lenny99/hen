@@ -18,21 +18,21 @@ const MockProvider = struct {
     /// tests can count the calls.
     mocks: struct {
         stream: ztf.Mock(agent.Provider.DeltaStream),
-        messages: ztf.Mock(agent.Provider.MessageStream),
     },
     /// The arguments of the last call. The framework mock stores call
     /// arguments as text, so the typed values go here.
     call: ?agent.Provider.SessionArgs = null,
-    /// The messages the message stream hands out, in order. After the last one
-    /// the stream ends, and `next` returns null.
-    replies: std.ArrayList(agent.Message) = .empty,
+    /// How many times the session released the stream.
+    deinits: usize = 0,
+    /// The deltas the stream hands out, in order. After the last one the
+    /// stream ends, and `next` returns null.
+    replies: std.ArrayList(agent.Delta) = .empty,
 
     fn init(alloc: std.mem.Allocator) MockProvider {
         return .{
             .allocator = alloc,
             .mocks = .{
                 .stream = ztf.Mock(agent.Provider.DeltaStream).init(alloc),
-                .messages = ztf.Mock(agent.Provider.MessageStream).init(alloc),
             },
         };
     }
@@ -40,38 +40,35 @@ const MockProvider = struct {
     fn deinit(self: *MockProvider) void {
         self.replies.deinit(self.allocator);
         self.mocks.stream.deinit();
-        self.mocks.messages.deinit();
     }
 
-    /// Make the message stream hand out these messages, in order.
-    fn returns(self: *MockProvider, replies: []const agent.Message) !void {
+    /// Make the stream hand out these deltas, in order.
+    fn returns(self: *MockProvider, replies: []const agent.Delta) !void {
         self.replies.clearRetainingCapacity();
         try self.replies.appendSlice(self.allocator, replies);
     }
 
-    fn supplyNext(impl: *anyopaque, _: std.Io) agent.Provider.MessageStream.Error!?agent.Message {
+    fn supplyNext(impl: *anyopaque, _: std.Io) agent.Provider.DeltaStream.Error!?agent.Delta {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
         if (self.replies.items.len == 0) return null;
         return self.replies.orderedRemove(0);
+    }
+
+    fn supplyDeinit(impl: *anyopaque, _: std.Io) void {
+        const self: *MockProvider = @ptrCast(@alignCast(impl));
+        self.deinits += 1;
     }
 
     fn stream(impl: *anyopaque, args: agent.Provider.SessionArgs) Error!agent.Provider.DeltaStream {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
         self.call = args;
         self.mocks.stream.recordCall("stream") catch return error.Canceled;
-        return self.mocks.stream.getReturnValue() orelse unreachable;
-    }
-
-    fn messages(impl: *anyopaque, args: agent.Provider.SessionArgs) Error!agent.Provider.MessageStream {
-        const self: *MockProvider = @ptrCast(@alignCast(impl));
-        self.call = args;
-        self.mocks.messages.recordCall("messages") catch return error.Canceled;
-        return self.mocks.messages.getReturnValue() orelse .{ .impl = self, .next_fn = supplyNext };
+        return .{ .impl = self, .next_fn = supplyNext, .deinit_fn = supplyDeinit };
     }
 
     fn asProvider(self: *MockProvider, alloc: std.mem.Allocator) !*const agent.Provider {
         const ref = try alloc.create(agent.Provider);
-        ref.* = agent.Provider.init(self, stream, messages);
+        ref.* = agent.Provider.init(self, stream);
         return ref;
     }
 };
@@ -139,7 +136,7 @@ test "run calls the provider once per run" {
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc);
 
-    try f.mock.mocks.messages.toHaveBeenCalledTimes(1);
+    try f.mock.mocks.stream.toHaveBeenCalledTimes(1);
     const call = f.mock.call.?;
     try expect(call.session).toEqual(Fixture.id);
     try expect(call.model).toEqual(session.model.id());
@@ -157,7 +154,7 @@ test "run hands the provider the whole history in order" {
     try session.appendMessage(alloc, "second");
     try session.run(std.testing.io, alloc);
 
-    try f.mock.mocks.messages.toHaveBeenCalledTimes(1);
+    try f.mock.mocks.stream.toHaveBeenCalledTimes(1);
     const call = f.mock.call.?;
     try expect(call.messages).toHaveLength(2);
     try expect(call.messages[0].user.content).toEqual("first");
@@ -165,7 +162,7 @@ test "run hands the provider the whole history in order" {
     try expect(call.tools).toBeEmpty();
 }
 
-test "the mocked stream hands out the messages the test asked for" {
+test "run folds the streamed deltas into one assistant message" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
     try f.init(alloc);
@@ -173,14 +170,122 @@ test "the mocked stream hands out the messages the test asked for" {
     const session = &f.session;
 
     try f.mock.returns(&.{
-        .{ .assistant = .{ .content = "Hi!" } },
-        .{ .assistant = .{ .content = "How can I help?" } },
+        .{ .delta = "Hi!" },
+        .{ .delta = " How can" },
+        .{ .delta = " I help?" },
     });
 
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc);
 
-    try expect(session.messages.items).toHaveLength(3);
-    try expect(session.messages.items[1].assistant.content).toBe("Hi!");
-    try expect(session.messages.items[2].assistant.content).toBe("How can I help?");
+    try expect(session.messages.items).toHaveLength(2);
+    try expect(session.messages.items[1].assistant.content).toEqual("Hi! How can I help?");
+}
+
+test "a done delta replaces the deltas before it" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .delta = "partial" },
+        .{ .done = "the complete answer" },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
+
+    try expect(session.messages.items[1].assistant.content).toEqual("the complete answer");
+}
+
+test "a completed lifecycle still commits the message" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .delta = "done." },
+        .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
+
+    try expect(session.messages.items).toHaveLength(2);
+}
+
+test "a tool call does not become part of the assistant text" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .delta = "let me check " },
+        .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{}" } },
+        .{ .done = "let me check the weather." },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
+
+    try expect(session.messages.items[1].assistant.content).toEqual("let me check the weather.");
+}
+
+test "an error delta leaves the history unchanged and releases the stream" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .delta = "partial" },
+        .{ .@"error" = "boom" },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try std.testing.expectError(error.ProviderFailed, session.run(std.testing.io, alloc));
+
+    try expect(session.messages.items).toHaveLength(1);
+    try std.testing.expectEqual(@as(usize, 1), f.mock.deinits);
+}
+
+test "a failed lifecycle leaves the history unchanged" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .lifecycle = .{ .id = "resp_1", .kind = .failed } },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try std.testing.expectError(error.ResponseFailed, session.run(std.testing.io, alloc));
+
+    try expect(session.messages.items).toHaveLength(1);
+}
+
+test "the stream is released after a completed turn" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{
+        .{ .delta = "hi" },
+    });
+
+    try session.appendMessage(alloc, "Hello, Agent!");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), f.mock.deinits);
 }

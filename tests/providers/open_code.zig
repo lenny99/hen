@@ -146,9 +146,16 @@ test "provider streams the reply from the wire" {
 
     var messages: std.ArrayList(agent.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
-    const tools: [0]agent.Tool = .{};
+    const tools: [0]agent.ToolDef = .{};
 
-    var stream = try opencode.stream(io, "opencode/glm-5.3", "You are a helpful agent", messages.items, &tools, UUID);
+    var stream = try opencode.asProvider().stream(.{
+        .model = "opencode/glm-5.3",
+        .system = "You are a helpful agent",
+        .messages = messages.items,
+        .tools = &tools,
+        .session = UUID,
+    });
+    defer stream.deinit(io);
 
     const reply = (try stream.next(io)) orelse return error.MissingReply;
     try std.testing.expectEqualStrings("hello from fake wire", reply.delta);

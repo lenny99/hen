@@ -128,8 +128,15 @@ pub const Response = struct {
 };
 
 /// Parse one SSE `data` payload into a streamed response event. The payload
-/// may include the trailing newline that `SseParser` adds. Unknown fields
-/// are ignored. The caller owns the result and calls `deinit`.
+/// may include the trailing newline that `SseParser` adds. Unknown fields are
+/// ignored. Every string in the result is copied into `allocator`, so the
+/// payload can be freed as soon as this returns; the caller owns the result
+/// and releases it through the allocator (an arena frees it wholesale).
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !std.json.Parsed(Response) {
-    return std.json.parseFromSlice(Response, allocator, data, .{ .ignore_unknown_fields = true });
+    return std.json.parseFromSlice(Response, allocator, data, .{
+        .ignore_unknown_fields = true,
+        // Slice input defaults to `.alloc_if_needed`, which leaves the strings
+        // pointing into `data`.
+        .allocate = .alloc_always,
+    });
 }

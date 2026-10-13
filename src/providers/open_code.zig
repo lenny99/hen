@@ -30,150 +30,173 @@ pub const OpencodeProvider = struct {
         allocator.destroy(self);
     }
 
-    pub fn stream(
-        self: OpencodeProvider,
-        _: std.Io,
-        model: agent.ModelId,
-        system: agent.SystemPrompt,
-        messages: []const agent.Message,
-        _: []const agent.Tool,
-        session: agent.Session.Id,
-    ) Provider.Error!Provider.DeltaStream {
-        var scope: std.heap.ArenaAllocator = .init(self.transport.gpa);
-        defer scope.deinit();
+    /// Open one streamed response. The stream owns the connection and the
+    /// arena behind the items it hands out; `Stream.deinit` releases both.
+    pub fn stream(self: *const OpencodeProvider, args: Provider.SessionArgs) Provider.Error!Provider.DeltaStream {
+        const gpa = self.transport.gpa;
 
-        var payload: std.Io.Writer.Allocating = .init(scope.allocator());
-        defer payload.deinit();
-        {
-            var conversation_messages = try scope.allocator().alloc(openai.Message, messages.len);
-            for (messages, 0..) |message, i| {
-                switch (message) {
-                    .user => conversation_messages[i] = .{ .role = openai.Role.user, .content = message.user.content },
-                    .assistant => conversation_messages[i] = .{ .role = openai.Role.assistant, .content = message.assistant.content },
-                }
-            }
-            const fmt = std.json.fmt(openai.Create{
-                .model = model,
-                .stream = true,
-                .messages = try std.mem.concat(scope.allocator(), openai.Message, &.{
-                    &.{.{ .role = openai.Role.system, .content = system }},
-                    conversation_messages,
-                }),
-            }, .{});
-            fmt.format(&payload.writer) catch return error.ConnectionError;
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        errdefer {
+            arena.deinit();
+            gpa.destroy(arena);
         }
+
+        const scratch = arena.allocator();
+
+        const body = buildPayload(scratch, args) catch return error.ConnectionError;
+        const authorization = bearerToken(scratch, self.token) catch return error.ConnectionError;
+        const session_id = args.session.toString(scratch) catch return error.ConnectionError;
 
         const request = http.Request.open(self.transport, .{
             .url = self.endpoints.go,
             .headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
-                .{ .name = "authorization", .value = try bearerToken(self.transport.gpa, self.token) },
-                .{ .name = "x-opencode-session", .value = try session.toString(scope.allocator()) },
+                .{ .name = "authorization", .value = authorization },
+                .{ .name = "x-opencode-session", .value = session_id },
             },
-            .payload = try payload.toOwnedSlice(),
+            .payload = body,
         }) catch return error.ConnectionError;
+        errdefer request.deinit();
 
         if (request.status().class() != .success) return error.ConnectionError;
 
-        const generator = try Generator.init(self.transport.gpa, request);
-        return .{ .impl = generator, .next_fn = Generator.next };
+        const generator = try Generator.init(gpa, arena);
+        generator.request = request;
+
+        return .{ .impl = generator, .next_fn = Generator.next, .deinit_fn = Generator.deinit };
+    }
+
+    /// The system prompt first, then the conversation, as one JSON body. The
+    /// body lives in the stream arena, which keeps it valid through the send.
+    fn buildPayload(alloc: std.mem.Allocator, args: Provider.SessionArgs) ![]const u8 {
+        var conversation = try alloc.alloc(openai.Message, args.messages.len);
+        for (args.messages, 0..) |message, i| {
+            conversation[i] = switch (message) {
+                .user => |user| .{ .role = openai.Role.user, .content = user.content },
+                .assistant => |assistant| .{ .role = openai.Role.assistant, .content = assistant.content },
+            };
+        }
+
+        const messages = try std.mem.concat(alloc, openai.Message, &.{
+            &.{.{ .role = openai.Role.system, .content = args.system }},
+            conversation,
+        });
+
+        var payload: std.Io.Writer.Allocating = .init(alloc);
+        std.json.fmt(openai.Create{
+            .model = args.model,
+            .stream = true,
+            .messages = messages,
+        }, .{}).format(&payload.writer) catch return error.OutOfMemory;
+
+        return payload.toOwnedSlice();
     }
 
     const Generator = struct {
-        scope: std.mem.Allocator,
-        request: ?*http.Request,
+        gpa: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
+        request: ?*http.Request = null,
         parser: http.SseParser = .init,
 
-        fn init(allocator: std.mem.Allocator, request: *http.Request) !*Generator {
-            const gen = try allocator.create(Generator);
-            gen.* = .{ .scope = allocator, .request = request };
-            return gen;
+        fn init(gpa: std.mem.Allocator, arena: *std.heap.ArenaAllocator) !*Generator {
+            const generator = try gpa.create(Generator);
+            generator.* = .{ .gpa = gpa, .arena = arena };
+            return generator;
+        }
+
+        /// Close the stream and release everything it owns: the response, the
+        /// parser, the item arena, and the generator itself.
+        fn deinit(impl: *anyopaque, _: std.Io) void {
+            const self: *Generator = @ptrCast(@alignCast(impl));
+            if (self.request) |request| request.deinit();
+            self.parser.deinit(self.gpa);
+            const gpa = self.gpa;
+            const arena = self.arena;
+            gpa.destroy(self);
+            arena.deinit();
+            gpa.destroy(arena);
         }
 
         fn next(impl: *anyopaque, _: std.Io) Provider.DeltaStream.Error!?agent.Delta {
             const self: *Generator = @ptrCast(@alignCast(impl));
             const request = self.request orelse return null;
+
+            // Whatever the previous call handed out is dead now: an item lives
+            // until the next call.
+            _ = self.arena.reset(.retain_capacity);
+            const alloc = self.arena.allocator();
+
             var buf: [4096]u8 = undefined;
             var body = request.body();
             while (true) {
-                const readBytes = body.read(&buf) catch {
-                    self.finish();
-                    return error.Failed;
-                };
-                if (readBytes == 0) {
-                    self.finish();
-                    return null;
-                }
-                self.parser.feed(self.scope, buf[0..readBytes]) catch |err| {
-                    self.finish();
-                    return err;
-                };
+                const read_bytes = body.read(&buf) catch return error.Failed;
+                if (read_bytes == 0) return null;
+
+                self.parser.feed(self.gpa, buf[0..read_bytes]) catch return error.Failed;
+
                 while (self.parser.take()) |event| {
+                    defer {
+                        self.gpa.free(event.data);
+                        self.gpa.free(event.extra);
+                    }
+
                     switch (event.kind) {
                         .reply => {
-                            // TODO: message ordering is currently ignored, messages come in out of order
-                            const parsed = openai.parse(self.scope, event.data) catch return error.ResponseError;
+                            const parsed = openai.parse(alloc, event.data) catch return error.ResponseError;
                             const kind = parsed.value.kind();
                             switch (kind) {
                                 .text_delta => |delta| return agent.Delta{ .delta = delta },
-                                // The complete assistant text of an item
-                                // (`response.output_text.done`).
-                                .text_done => |done| return agent.Delta{ .done = done },
-                                // A fragment of streamed function call arguments
-                                // (`response.function_call_arguments.delta`).
-                                .arguments_delta => |args| {
-                                    _ = self.collectToolCall(args);
+                                .text_done => |text| return agent.Delta{ .done = text },
+                                // The complete call arrives on the output item;
+                                // the argument fragments before it add nothing.
+                                .arguments_delta, .arguments_done => {},
+                                .item => |item| {
+                                    if (toInvocation(item)) |invocation| return agent.Delta{ .tool_invocation = invocation };
                                 },
-                                // The complete function call arguments of an item
-                                // (`response.function_call_arguments.done`).
-                                .arguments_done => return agent.Delta{ .tool_invocation = undefined }, // TODO:
-                                // A finished output item (`response.output_item.done`).
-                                .item => return agent.Delta{ .tool_return = undefined }, // TODO:
-                                // The final response body (`response.completed`).
-                                .completed, .incomplete, .failed => |response_body| return try toLifecycle(kind, response_body),
-                                .error_message => |err| return agent.Delta{ .@"error" = err },
+                                .completed, .incomplete, .failed => |response| return toLifecycle(kind, response),
+                                .error_message => |message| return agent.Delta{ .@"error" = message },
                                 .other => {},
                             }
                         },
-                        .error_reply => {
-                            self.finish();
-                            return error.Failed;
-                        },
+                        .error_reply => return error.Failed,
                         .done => {},
                     }
                 }
             }
         }
-
-        fn collectToolCall(_: *Generator, _: []const u8 ) agent.Tool.Invocation {
-            return .{};
-        }
-
-        /// Release the response. The parser keeps the event payloads that the
-        /// caller received as message content.
-        fn finish(self: *Generator) void {
-            if (self.request) |request| request.deinit();
-            self.request = null;
-        }
     };
 
-    pub fn asProvider(self: *const OpencodeProvider) agent.Provider {
-        return .{ .impl = &self, .table = .{
-            .stream = stream,
-        } };
+    fn streamVia(impl: *anyopaque, args: Provider.SessionArgs) Provider.Error!Provider.DeltaStream {
+        const self: *const OpencodeProvider = @ptrCast(@alignCast(impl));
+        return self.stream(args);
+    }
+
+    pub fn asProvider(self: *const OpencodeProvider) Provider {
+        return Provider.init(@constCast(self), streamVia);
     }
 };
 
-fn toToolReturn(_: openai.Response.OutputItem) !agent.Delta {
-    return .{ .tool_return = .{} };
+/// One assembled tool call from a finished output item, or null when the item
+/// is not a function call.
+fn toInvocation(item: *const openai.Response.OutputItem) ?agent.Tool.Invocation {
+    const item_type = item.type orelse return null;
+    if (!std.mem.eql(u8, item_type, "function_call")) return null;
+
+    const id = item.call_id orelse item.id orelse return null;
+    return agent.Tool.Invocation{
+        .id = id,
+        .name = item.name orelse return null,
+        .arguments = item.arguments orelse "",
+    };
 }
 
-fn toLifecycle(kind: openai.Response.Kind, body: *const openai.Response.Body) !agent.Delta {
-    const lifecycle_status: agent.Lifecycle.Status = switch (kind) {
+fn toLifecycle(kind: openai.Response.Kind, body: *const openai.Response.Body) agent.Delta {
+    const status: agent.Lifecycle.Status = switch (kind) {
         .completed => .completed,
         .incomplete => .incomplete,
         .failed => .failed,
         else => unreachable,
     };
-    return .{ .lifecycle = .{ .id = body.id, .kind = lifecycle_status } };
+    return agent.Delta{ .lifecycle = .{ .id = body.id, .kind = status } };
 }
