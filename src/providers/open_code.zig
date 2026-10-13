@@ -143,7 +143,12 @@ pub const OpencodeProvider = struct {
 
                     switch (event.kind) {
                         .reply => {
-                            const parsed = openai.parse(alloc, event.data) catch return error.ResponseError;
+                            const parsed = openai.parse(alloc, event.data) catch |err| {
+                                // TODO: temporary debug. Dump the raw reply when it
+                                // does not parse, to see what opencode really sends.
+                                std.debug.print("[hen] opencode reply parse failed ({t}): {s}\n", .{ err, event.data });
+                                return error.ResponseError;
+                            };
                             const kind = parsed.value.kind();
                             switch (kind) {
                                 .text_delta => |delta| return agent.Delta{ .delta = delta },
@@ -156,7 +161,11 @@ pub const OpencodeProvider = struct {
                                 },
                                 .completed, .incomplete, .failed => |response| return toLifecycle(kind, response),
                                 .error_message => |message| return agent.Delta{ .@"error" = message },
-                                .other => {},
+                                .other => {
+                                    // TODO: temporary debug. Name the event types the
+                                    // parser does not model yet.
+                                    std.debug.print("[hen] opencode event type `{s}` is not modelled\n", .{parsed.value.type});
+                                },
                             }
                         },
                         .error_reply => return error.Failed,
