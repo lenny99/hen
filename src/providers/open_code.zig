@@ -130,11 +130,6 @@ pub const OpencodeProvider = struct {
             var buf: [4096]u8 = undefined;
             var body = request.body();
             while (true) {
-                const read_bytes = body.read(&buf) catch return error.Failed;
-                if (read_bytes == 0) return null;
-
-                self.parser.feed(self.gpa, buf[0..read_bytes]) catch return error.Failed;
-
                 while (self.parser.take()) |event| {
                     defer {
                         self.gpa.free(event.data);
@@ -143,35 +138,36 @@ pub const OpencodeProvider = struct {
 
                     switch (event.kind) {
                         .reply => {
-                            const parsed = openai.parse(alloc, event.data) catch |err| {
+                            const parsed = openai.parseChunk(alloc, event.data) catch |err| {
                                 // TODO: temporary debug. Dump the raw reply when it
                                 // does not parse, to see what opencode really sends.
                                 std.debug.print("[hen] opencode reply parse failed ({t}): {s}\n", .{ err, event.data });
                                 return error.ResponseError;
                             };
-                            const kind = parsed.value.kind();
-                            switch (kind) {
-                                .text_delta => |delta| return agent.Delta{ .delta = delta },
-                                .text_done => |text| return agent.Delta{ .done = text },
-                                // The complete call arrives on the output item;
-                                // the argument fragments before it add nothing.
-                                .arguments_delta, .arguments_done => {},
-                                .item => |item| {
-                                    if (toInvocation(item)) |invocation| return agent.Delta{ .tool_invocation = invocation };
-                                },
-                                .completed, .incomplete, .failed => |response| return toLifecycle(kind, response),
-                                .error_message => |message| return agent.Delta{ .@"error" = message },
-                                .other => {
-                                    // TODO: temporary debug. Name the event types the
-                                    // parser does not model yet.
-                                    std.debug.print("[hen] opencode event type `{s}` is not modelled\n", .{parsed.value.type});
-                                },
+                            const chunk = parsed.value;
+
+                            if (chunk.@"error") |failure| {
+                                return agent.Delta{ .@"error" = failure.message orelse "provider error" };
+                            }
+                            if (chunk.text()) |text| return agent.Delta{ .delta = text };
+                            // TODO: assemble the streamed `tool_calls` fragments
+                            // once the agent runs tools.
+                            if (chunk.finishReason()) |reason| {
+                                return agent.Delta{ .lifecycle = .{
+                                    .id = chunk.id orelse "chatcmpl",
+                                    .kind = finishKind(reason),
+                                } };
                             }
                         },
                         .error_reply => return error.Failed,
                         .done => {},
                     }
                 }
+
+                const read_bytes = body.read(&buf) catch return error.Failed;
+                if (read_bytes == 0) return null;
+
+                self.parser.feed(self.gpa, buf[0..read_bytes]) catch return error.Failed;
             }
         }
     };
@@ -186,26 +182,9 @@ pub const OpencodeProvider = struct {
     }
 };
 
-/// One assembled tool call from a finished output item, or null when the item
-/// is not a function call.
-fn toInvocation(item: *const openai.Response.OutputItem) ?agent.Tool.Invocation {
-    const item_type = item.type orelse return null;
-    if (!std.mem.eql(u8, item_type, "function_call")) return null;
-
-    const id = item.call_id orelse item.id orelse return null;
-    return agent.Tool.Invocation{
-        .id = id,
-        .name = item.name orelse return null,
-        .arguments = item.arguments orelse "",
-    };
-}
-
-fn toLifecycle(kind: openai.Response.Kind, body: *const openai.Response.Body) agent.Delta {
-    const status: agent.Lifecycle.Status = switch (kind) {
-        .completed => .completed,
-        .incomplete => .incomplete,
-        .failed => .failed,
-        else => unreachable,
-    };
-    return agent.Delta{ .lifecycle = .{ .id = body.id, .kind = status } };
+/// Map a Chat Completions `finish_reason` onto the agent's lifecycle status.
+fn finishKind(reason: []const u8) agent.Lifecycle.Status {
+    if (std.mem.eql(u8, reason, "length")) return .incomplete;
+    if (std.mem.eql(u8, reason, "content_filter")) return .failed;
+    return .completed;
 }

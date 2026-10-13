@@ -140,3 +140,73 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !std.json.Parsed(Re
         .allocate = .alloc_always,
     });
 }
+
+/// One streamed Chat Completions chunk (`/chat/completions` with
+/// `stream: true`). Every SSE frame carries one; the stream ends with
+/// `data: [DONE]`. Only the fields the provider reads are modelled.
+pub const Chunk = struct {
+    pub const Error = struct {
+        code: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+    };
+
+    pub const Function = struct {
+        name: ?[]const u8 = null,
+        arguments: ?[]const u8 = null,
+    };
+
+    /// One tool call fragment. A call's `id`, `function.name`, and
+    /// `function.arguments` arrive split across chunks and are joined by
+    /// `index`.
+    pub const ToolCall = struct {
+        index: ?u32 = null,
+        id: ?[]const u8 = null,
+        type: ?[]const u8 = null,
+        function: ?Function = null,
+    };
+
+    pub const Delta = struct {
+        role: ?[]const u8 = null,
+        content: ?[]const u8 = null,
+        tool_calls: ?[]const ToolCall = null,
+    };
+
+    pub const Choice = struct {
+        index: ?u32 = null,
+        delta: ?Delta = null,
+        finish_reason: ?[]const u8 = null,
+    };
+
+    id: ?[]const u8 = null,
+    choices: ?[]const Choice = null,
+    @"error": ?Error = null,
+
+    /// The first non-empty text fragment of this chunk, or null when it carries
+    /// no text: the role-only opener, an empty keepalive, or a tool-call
+    /// fragment.
+    pub fn text(self: *const Chunk) ?[]const u8 {
+        for (self.choices orelse return null) |choice| {
+            const content = (choice.delta orelse continue).content orelse continue;
+            if (content.len > 0) return content;
+        }
+        return null;
+    }
+
+    /// The first non-null `finish_reason`, which arrives on the chunk that ends
+    /// the choice.
+    pub fn finishReason(self: *const Chunk) ?[]const u8 {
+        for (self.choices orelse return null) |choice| {
+            if (choice.finish_reason) |reason| return reason;
+        }
+        return null;
+    }
+};
+
+/// Parse one SSE `data` payload into a Chat Completions chunk. See `parse` for
+/// the ownership and allocator rules.
+pub fn parseChunk(allocator: std.mem.Allocator, data: []const u8) !std.json.Parsed(Chunk) {
+    return std.json.parseFromSlice(Chunk, allocator, data, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+}

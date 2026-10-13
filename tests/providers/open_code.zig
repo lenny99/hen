@@ -133,7 +133,15 @@ test "provider streams the reply from the wire" {
 
     var server = try MockServer.init(io);
     defer server.deinit(io, std.testing.allocator);
-    try server.responses.pushBack(std.testing.allocator, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from fake wire\"}\n\n");
+    const stream_body =
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" ++
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{\"content\":\"hello from fake wire\"},\"finish_reason\":null}]}\n\n" ++
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" ++
+        "data: [DONE]\n\n";
+    try server.responses.pushBack(std.testing.allocator, stream_body);
     try server.spawn(io, std.testing.allocator);
 
     const token = agent.Secret{ .name = "opencode", .value = "test-token" };
@@ -159,6 +167,13 @@ test "provider streams the reply from the wire" {
 
     const reply = (try stream.next(io)) orelse return error.MissingReply;
     try std.testing.expectEqualStrings("hello from fake wire", reply.delta);
+
+    const end = (try stream.next(io)) orelse return error.MissingReply;
+    switch (end) {
+        .lifecycle => |lifecycle| try std.testing.expectEqual(agent.Lifecycle.Status.completed, lifecycle.kind),
+        else => return error.UnexpectedDelta,
+    }
+
     try std.testing.expectEqual(@as(?agent.Delta, null), try stream.next(io));
 
     try server.await(io);
