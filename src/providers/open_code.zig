@@ -101,6 +101,7 @@ pub const OpencodeProvider = struct {
         arena: *std.heap.ArenaAllocator,
         request: *http.Request,
         parser: http.SseParser = .init,
+        buf: std.ArrayList(u8) = .empty,
 
         /// Close the stream: release the connection, then drop the arena.
         fn deinit(impl: *anyopaque, _: std.Io) void {
@@ -116,7 +117,6 @@ pub const OpencodeProvider = struct {
             const self: *Generator = @ptrCast(@alignCast(impl));
             const alloc = self.arena.allocator();
 
-            var buf: [4096]u8 = undefined;
             var body = self.request.body();
             while (true) {
                 while (self.parser.take()) |event| {
@@ -147,10 +147,18 @@ pub const OpencodeProvider = struct {
                     }
                 }
 
-                const read_bytes = body.read(&buf) catch return error.Failed;
+                const start = self.buf.items.len;
+                try self.buf.resize(alloc, start + 4096);
+                const read_bytes = body.read(self.buf.items[start..]) catch return error.Failed;
+                self.buf.shrinkRetainingCapacity(start + read_bytes);
                 if (read_bytes == 0) return null;
 
-                self.parser.feed(alloc, buf[0..read_bytes]) catch return error.Failed;
+                const consumed = self.parser.feed(alloc, self.buf.items) catch return error.Failed;
+                const keep = self.buf.items.len - consumed;
+                if (consumed > 0) {
+                    std.mem.copyForwards(u8, self.buf.items[0..keep], self.buf.items[consumed..]);
+                    self.buf.shrinkRetainingCapacity(keep);
+                }
             }
         }
     };

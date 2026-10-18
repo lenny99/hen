@@ -4,8 +4,8 @@
 //!
 //! Grammar: `name: value` lines; an empty line ends one event. Line
 //! endings may be `"\n"`, `"\r\n"`, or a bare `"\r"` followed by
-//! content. A chunk may split a line or an event; `feed` buffers
-//! partial input until the line terminator arrives.
+//! content. A chunk may split a line or an event; `feed` parses the
+//! complete lines and returns the unconsumed partial line.
 //!
 //! Field dispatch: `data` collects the payload lines; `event` names the
 //! frame and may decide the `Kind`; every other field is kept as a
@@ -37,8 +37,6 @@ pub const Event = struct {
 };
 
 pub const SseParser = struct {
-    /// Stream bytes waiting for their line terminator.
-    line_buf: std.ArrayList(u8) = .empty,
 
     /// Current frame under construction.
     data: std.ArrayList(u8) = .empty,
@@ -62,34 +60,25 @@ pub const SseParser = struct {
             alloc.free(e.extra);
         }
         self.events.deinit(alloc);
-        self.line_buf.deinit(alloc);
         self.data.deinit(alloc);
         self.extra.deinit(alloc);
     }
 
     /// Accept stream bytes of any length; chunks may split lines and
-    /// frames. Processed lines drop out of `line_buf` after the pass,
-    /// so a long stream never grows it.
-    pub fn feed(self: *SseParser, alloc: std.mem.Allocator, bytes: []const u8) Error!void {
-        try self.line_buf.appendSlice(alloc, bytes);
+    /// frames. Parse the complete lines in place and return the number of
+    /// bytes consumed. A partial line stays in `bytes[returned..]`.
+    pub fn feed(self: *SseParser, alloc: std.mem.Allocator, bytes: []const u8) Error!usize {
         var idx: usize = 0;
-        while (idx < self.line_buf.items.len) {
-            // Line terminators: "\n", "\r\n", or a bare "\r".
-            const term = std.mem.indexOfAnyPos(u8, self.line_buf.items, idx, "\r\n") orelse break;
+        while (idx < bytes.len) {
+            const term = std.mem.indexOfAnyPos(u8, bytes, idx, "\r\n") orelse break;
             var skip: usize = 1;
-            if (self.line_buf.items[term] == '\r' and
-                term + 1 < self.line_buf.items.len and self.line_buf.items[term + 1] == '\n')
-            {
+            if (bytes[term] == '\r' and term + 1 < bytes.len and bytes[term + 1] == '\n') {
                 skip = 2;
             }
-            try self.parseLine(alloc, self.line_buf.items[idx..term]);
+            try self.parseLine(alloc, bytes[idx..term]);
             idx = term + skip;
         }
-        const keep = self.line_buf.items.len - idx;
-        if (idx > 0) {
-            std.mem.copyForwards(u8, self.line_buf.items[0..keep], self.line_buf.items[idx..]);
-            self.line_buf.shrinkRetainingCapacity(keep);
-        }
+        return idx;
     }
 
     fn parseLine(self: *SseParser, alloc: std.mem.Allocator, line: []const u8) Error!void {
@@ -176,9 +165,14 @@ test "frames" {
     var parser: SseParser = .{};
     defer parser.deinit(alloc);
 
-    try parser.feed(alloc, "event: reply\ndata: {\"");
-    try parser.feed(alloc, "chunk\": 1}\n\n");
-    try parser.feed(alloc, "data: [DONE]\n\n");
+    const first = "event: reply\ndata: {\"";
+    const consumed = try parser.feed(alloc, first);
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(alloc);
+    try joined.appendSlice(alloc, first[consumed..]);
+    try joined.appendSlice(alloc, "chunk\": 1}\n\n");
+    _ = try parser.feed(alloc, joined.items);
+    _ = try parser.feed(alloc, "data: [DONE]\n\n");
 
     {
         const event = parser.take() orelse return error.TestUnexpectedResult;
@@ -197,7 +191,6 @@ test "frames" {
     }
 
     try std.testing.expectEqual(@as(?Event, null), parser.take());
-    try std.testing.expectEqual(@as(usize, 0), parser.line_buf.items.len);
 }
 
 test "carriage returns" {
@@ -205,7 +198,7 @@ test "carriage returns" {
     var parser: SseParser = .{};
     defer parser.deinit(alloc);
 
-    try parser.feed(alloc, "data: a\r\ndata: b\r\n\r\n");
+    _ = try parser.feed(alloc, "data: a\r\ndata: b\r\n\r\n");
     const event = parser.take() orelse return error.TestUnexpectedResult;
     defer alloc.free(event.data);
     defer alloc.free(event.extra);
@@ -219,13 +212,12 @@ test "naked carriage returns" {
     var parser: SseParser = .{};
     defer parser.deinit(alloc);
 
-    try parser.feed(alloc, "data: a\rdata: b\r\r");
+    _ = try parser.feed(alloc, "data: a\rdata: b\r\r");
     const event = parser.take() orelse return error.TestUnexpectedResult;
     defer alloc.free(event.data);
     defer alloc.free(event.extra);
     try std.testing.expectEqual(Kind.reply, event.kind);
     try std.testing.expectEqualStrings("a\nb\n", event.data);
-    try std.testing.expectEqual(@as(usize, 0), parser.line_buf.items.len);
 }
 
 test "error event" {
@@ -233,7 +225,7 @@ test "error event" {
     var parser: SseParser = .{};
     defer parser.deinit(alloc);
 
-    try parser.feed(alloc, "event: error\ndata: {\"message\": \"x\"}\n\n");
+    _ = try parser.feed(alloc, "event: error\ndata: {\"message\": \"x\"}\n\n");
     const event = parser.take() orelse return error.TestUnexpectedResult;
     defer alloc.free(event.data);
     defer alloc.free(event.extra);
