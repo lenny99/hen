@@ -13,6 +13,16 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     (&chicken_build).link(chicken_module);
+    const chicken_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/chicken/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "chicken", .module = chicken_module },
+        },
+    });
+    (&chicken_build).link(chicken_test_module);
 
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
@@ -93,7 +103,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const chicken_tests = b.addTest(.{
-        .root_module = chicken_module,
+        .name = "chicken-tests",
+        .root_module = chicken_test_module,
     });
 
     const run_chicken_tests = b.addRunArtifact(chicken_tests);
