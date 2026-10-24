@@ -1,4 +1,4 @@
 test {
-    _ = @import("open_code.zig");
+    _ = @import("opencode.zig");
     _ = @import("openai.zig");
 }

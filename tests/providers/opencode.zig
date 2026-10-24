@@ -1,5 +1,5 @@
 const std = @import("std");
-const agent = @import("agent");
+const instance = @import("instance");
 const provider = @import("provider");
 const http = @import("http");
 const ztf = @import("zig_test_framework");
@@ -13,7 +13,7 @@ test "opencode provider initializes" {
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
 
-    const token = agent.Secret{ .name = "opencode", .value = "test-token" };
+    const token = instance.Secret{ .name = "opencode", .value = "test-token" };
     var opencode = try OpencodeProvider.init(gpa, &transport, &token);
     defer opencode.deinit(gpa);
 }
@@ -81,8 +81,8 @@ const MockServer = struct {
             var headers: std.ArrayList([]const u8) = .empty;
             while (true) {
                 const LENGTH_HEADER = "content-length:";
-                const raw = try reader.interface.takeDelimiterExclusive('\n');
-                const line = std.mem.trimEnd(u8, raw, "\r");
+                const raw = try reader.interface.takeDelimiterInclusive('\n');
+                const line = std.mem.trimEnd(u8, raw, "\r\n");
                 if (line.len == 0) break;
                 if (std.ascii.startsWithIgnoreCase(line, LENGTH_HEADER)) {
                     const value = std.mem.trim(u8, line[LENGTH_HEADER.len..], " ");
@@ -118,7 +118,7 @@ const MockServer = struct {
     }
 };
 
-const UUID = agent.Session.Id.fromBytes(.{
+const UUID = instance.Session.Id.fromBytes(.{
     0x01, 0x02, 0x03, 0x04,
     0x05, 0x06, 0x07, 0x08,
     0x09, 0x0a, 0x0b, 0x0c,
@@ -144,7 +144,7 @@ test "provider streams the reply from the wire" {
     try server.responses.pushBack(std.testing.allocator, stream_body);
     try server.spawn(io, std.testing.allocator);
 
-    const token = agent.Secret{ .name = "opencode", .value = "test-token" };
+    const token = instance.Secret{ .name = "opencode", .value = "test-token" };
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
     var opencode = try OpencodeProvider.init(gpa, &transport, &token);
@@ -152,13 +152,13 @@ test "provider streams the reply from the wire" {
 
     opencode.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
-    var messages: std.ArrayList(agent.Message) = .empty;
+    var messages: std.ArrayList(instance.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
-    const tools: [0]agent.ToolDef = .{};
+    const tools: [0]instance.ToolDef = .{};
 
     var stream = try opencode.asProvider().stream(.{
         .model = "opencode/glm-5.3",
-        .system = "You are a helpful agent",
+        .system = "You are a helpful instance",
         .messages = messages.items,
         .tools = &tools,
         .session = UUID,
@@ -169,14 +169,73 @@ test "provider streams the reply from the wire" {
 
     const end = (try stream.next(io)) orelse return error.MissingReply;
     switch (end) {
-        .lifecycle => |lifecycle| try std.testing.expectEqual(agent.Lifecycle.Status.completed, lifecycle.kind),
+        .lifecycle => |lifecycle| try std.testing.expectEqual(instance.Lifecycle.Status.completed, lifecycle.kind),
         else => return error.UnexpectedDelta,
     }
 
-    try std.testing.expectEqual(@as(?agent.Delta, null), try stream.next(io));
+    try std.testing.expectEqual(@as(?instance.Delta, null), try stream.next(io));
 
     try std.testing.expectEqualStrings("hello from fake wire", reply.delta);
 
     try server.await(io);
     try std.testing.expectEqual(@as(usize, 1), server.recorder.items.len);
+}
+
+test "that 'x-opencode-session' get sent to endpoint" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    var server = try MockServer.init(io);
+    defer server.deinit(io, std.testing.allocator);
+    const stream_body =
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" ++
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{\"content\":\"hello from fake wire\"},\"finish_reason\":null}]}\n\n" ++
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" ++
+        "data: [DONE]\n\n";
+    try server.responses.pushBack(std.testing.allocator, stream_body);
+    try server.spawn(io, std.testing.allocator);
+    
+    const token = instance.Secret{ .name = "opencode", .value = "test-token" };
+    var transport = try http.Transport.init(io, gpa);
+    defer transport.deinit();
+    var opencode = try OpencodeProvider.init(gpa, &transport, &token);
+    defer opencode.deinit(gpa);
+
+    opencode.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
+
+    var messages: std.ArrayList(instance.Message) = .empty;
+    try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
+    const tools: [0]instance.ToolDef = .{};
+
+    var stream = try opencode.asProvider().stream(.{
+        .model = "opencode/glm-5.3",
+        .system = "You are a helpful instance",
+        .messages = messages.items,
+        .tools = &tools,
+        .session = UUID,
+    });
+    defer stream.deinit(io);
+
+    try server.await(io);
+
+    const initial_request = server.recorder.items[0];
+
+    const expected_headers = [_][]const u8{
+        "content-type: application/json",
+        "authorization: Bearer test-token",
+        "x-opencode-session: 01020304-0506-0708-090a-0b0c0d0e0f10",
+    };
+    for (expected_headers) |expected| {
+        var found = false;
+        for (initial_request.headers) |header| {
+            if (std.mem.eql(u8, header, expected)) found = true;
+        }
+        try std.testing.expect(found);
+    }
+
 }

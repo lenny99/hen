@@ -16,7 +16,7 @@ var runtime_mutex: std.atomic.Mutex = .unlocked;
 var runtime_owner: ?std.Thread.Id = null;
 var default_toplevel_started = false;
 
-/// Configuration passed to `CHICKEN_initialize`.
+/// Configuration passed to the CHICKEN initialize function.
 ///
 /// A value of zero asks CHICKEN to select its default. Sizes are in bytes,
 /// except `symbol_table_size`, which is CHICKEN's symbol-table size argument.
@@ -169,3 +169,34 @@ fn resultSlice(output: []u8) Error![]u8 {
     return output[0..end];
 }
 
+/// One synchronous call into an environment: Zig sends one action (a tool
+/// name and its raw JSON arguments) and reads back one observation.
+///
+/// The first cut runs the bridge synchronously on the main thread; the call
+/// stays on the thread that initialized the CHICKEN runtime.
+pub const Environment = struct {
+    impl: *anyopaque,
+
+    /// Runs one action. Returns the observation as caller-owned text. A tool
+    /// error is an observation too; only allocation failure and cancellation
+    /// propagate as errors.
+    call_fn: *const fn (
+        impl: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        arguments: []const u8,
+    ) CallError![]u8,
+
+    pub const CallError = std.mem.Allocator.Error || std.Io.Cancelable || error{Failed};
+
+    pub fn call(
+        self: Environment,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        arguments: []const u8,
+    ) CallError![]u8 {
+        return self.call_fn(self.impl, io, allocator, name, arguments);
+    }
+};

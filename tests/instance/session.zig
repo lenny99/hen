@@ -1,5 +1,5 @@
 const std = @import("std");
-const agent = @import("agent");
+const instance = @import("instance");
 const ztf = @import("zig_test_framework");
 
 /// `ztf.expect` asks for an allocator, but it never uses it. The matchers only
@@ -11,47 +11,66 @@ inline fn expect(actual: anytype) @TypeOf(ztf.expect(std.testing.allocator, actu
 }
 
 const MockProvider = struct {
-    const Error = agent.Provider.Error;
+    const Error = instance.Provider.Error;
 
     allocator: std.mem.Allocator,
     /// The framework mocks record every call to the provider functions, so the
     /// tests can count the calls.
     mocks: struct {
-        stream: ztf.Mock(agent.Provider.DeltaStream),
+        stream: ztf.Mock(instance.Provider.DeltaStream),
     },
     /// The arguments of the last call. The framework mock stores call
     /// arguments as text, so the typed values go here.
-    call: ?agent.Provider.SessionArgs = null,
+    call: ?instance.Provider.SessionArgs = null,
     /// How many times the session released the stream.
     deinits: usize = 0,
     /// The deltas the stream hands out, in order. After the last one the
     /// stream ends, and `next` returns null.
-    replies: std.ArrayList(agent.Delta) = .empty,
+    replies: std.ArrayList(instance.Delta) = .empty,
+    /// Multi-round mode: stream call n gets `rounds[n]`, the last one repeats.
+    rounds: std.ArrayList(std.ArrayList(instance.Delta)) = .empty,
+    queue_index: usize = 0,
+    calls: usize = 0,
+    active: ?*std.ArrayList(instance.Delta) = null,
 
     fn init(alloc: std.mem.Allocator) MockProvider {
         return .{
             .allocator = alloc,
             .mocks = .{
-                .stream = ztf.Mock(agent.Provider.DeltaStream).init(alloc),
+                .stream = ztf.Mock(instance.Provider.DeltaStream).init(alloc),
             },
         };
     }
 
     fn deinit(self: *MockProvider) void {
+        for (self.rounds.items) |*list| list.deinit(self.allocator);
+        self.rounds.deinit(self.allocator);
         self.replies.deinit(self.allocator);
         self.mocks.stream.deinit();
     }
 
     /// Make the stream hand out these deltas, in order.
-    fn returns(self: *MockProvider, replies: []const agent.Delta) !void {
+    fn returns(self: *MockProvider, replies: []const instance.Delta) !void {
         self.replies.clearRetainingCapacity();
         try self.replies.appendSlice(self.allocator, replies);
     }
 
-    fn supplyNext(impl: *anyopaque, _: std.Io) agent.Provider.DeltaStream.Error!?agent.Delta {
+    /// Queue the replies of each round: stream call n gets round n, the
+    /// last round repeats.
+    fn queue(self: *MockProvider, alloc: std.mem.Allocator, rounds: []const []const instance.Delta) !void {
+        self.calls = rounds.len;
+        for (rounds) |round| {
+            var list: std.ArrayList(instance.Delta) = .empty;
+            try list.appendSlice(self.allocator, round);
+            try self.rounds.append(alloc, list);
+        }
+    }
+
+    fn supplyNext(impl: *anyopaque, _: std.Io) instance.Provider.DeltaStream.Error!?instance.Delta {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
-        if (self.replies.items.len == 0) return null;
-        return self.replies.orderedRemove(0);
+        const list = self.active orelse &self.replies;
+        if (list.items.len == 0) return null;
+        return list.orderedRemove(0);
     }
 
     fn supplyDeinit(impl: *anyopaque, _: std.Io) void {
@@ -59,23 +78,28 @@ const MockProvider = struct {
         self.deinits += 1;
     }
 
-    fn stream(impl: *anyopaque, args: agent.Provider.SessionArgs) Error!agent.Provider.DeltaStream {
+    fn stream(impl: *anyopaque, args: instance.Provider.SessionArgs) Error!instance.Provider.DeltaStream {
         const self: *MockProvider = @ptrCast(@alignCast(impl));
         self.call = args;
+        if (self.rounds.items.len > 0) {
+            if (self.queue_index >= self.rounds.items.len) self.queue_index = self.rounds.items.len - 1;
+            self.active = &self.rounds.items[self.queue_index];
+            self.queue_index += 1;
+        }
         self.mocks.stream.recordCall("stream") catch return error.Canceled;
         return .{ .impl = self, .next_fn = supplyNext, .deinit_fn = supplyDeinit };
     }
 
-    fn asProvider(self: *MockProvider, alloc: std.mem.Allocator) !*const agent.Provider {
-        const ref = try alloc.create(agent.Provider);
-        ref.* = agent.Provider.init(self, stream);
+    fn asProvider(self: *MockProvider, alloc: std.mem.Allocator) !*const instance.Provider {
+        const ref = try alloc.create(instance.Provider);
+        ref.* = instance.Provider.init(self, stream);
         return ref;
     }
 };
 
 const Fixture = struct {
     /// One fixed id that every test uses.
-    const id = agent.Session.Id.fromBytes(.{
+    const id = instance.Session.Id.fromBytes(.{
         0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08,
         0x09, 0x0a, 0x0b, 0x0c,
@@ -83,8 +107,8 @@ const Fixture = struct {
     });
 
     mock: MockProvider,
-    provider: *const agent.Provider,
-    session: agent.Session,
+    provider: *const instance.Provider,
+    session: instance.Session,
 
     /// Fill in the fields. Do not return a Fixture by value. The provider
     /// points at the mock, and a returned value leaves that pointer on a copy.
@@ -93,7 +117,7 @@ const Fixture = struct {
         errdefer self.mock.deinit();
         self.provider = try self.mock.asProvider(alloc);
         errdefer alloc.destroy(self.provider);
-        self.session = try agent.Session.init(id, self.provider);
+        self.session = try instance.Session.init(id, self.provider);
     }
 
     fn deinit(self: *Fixture, alloc: std.mem.Allocator) void {
@@ -288,4 +312,112 @@ test "the stream is released after a completed turn" {
     try session.run(std.testing.io, alloc);
 
     try std.testing.expectEqual(@as(usize, 1), f.mock.deinits);
+}
+
+const MockEnvironment = struct {
+    calls: usize = 0,
+    last_name: []const u8 = "",
+    last_arguments: []const u8 = "",
+    fail: bool = false,
+
+    fn callFn(impl: *anyopaque, _: std.Io, alloc: std.mem.Allocator, name: []const u8, arguments: []const u8) instance.Environment.CallError![]u8 {
+        const self: *MockEnvironment = @ptrCast(@alignCast(impl));
+        self.calls += 1;
+        self.last_name = name;
+        self.last_arguments = arguments;
+        if (self.fail) return error.Failed;
+        return try alloc.dupe(u8, "observation text");
+    }
+
+    fn asEnvironment(self: *MockEnvironment) instance.Environment {
+        return .{ .impl = self, .call_fn = callFn };
+    }
+};
+
+test "the request loop runs each action round until a text-only answer" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{\"city\":\"berlin\"}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), env.calls);
+    try std.testing.expectEqualStrings("weather", env.last_name);
+    try std.testing.expectEqual(@as(usize, 4), session.messages.items.len);
+    const carried = session.messages.items[1].assistant;
+    try std.testing.expectEqual(@as(usize, 1), carried.tool_calls.len);
+    try std.testing.expectEqualStrings("weather", carried.tool_calls[0].name);
+    const observation = session.messages.items[2].tool;
+    try std.testing.expectEqualStrings("call_1", observation.id);
+    try std.testing.expectEqualStrings("observation text", observation.content);
+    try std.testing.expectEqualStrings("All done.", session.messages.items[3].assistant.content);
+}
+
+test "a failed action becomes an observation" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{ .fail = true };
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "Handled." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqualStrings("Error: Failed", session.messages.items[2].tool.content);
+}
+
+test "the session asks for a final answer when the round budget is spent" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+    session.max_rounds = 1;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "final answer" }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), f.mock.calls);
+    try expect(f.mock.call.?.tools).toBeEmpty();
+    try expect(session.messages.items[3].user.content).toEqual(instance.Session.final_answer_prompt);
+    try expect(session.messages.items[4].assistant.content).toEqual("final answer");
 }

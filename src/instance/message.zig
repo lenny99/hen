@@ -6,7 +6,11 @@ pub const Message = union(enum) {
     },
     assistant: struct {
         content: []const u8,
+        /// The tool calls the model made in this turn, in stream order.
+        tool_calls: []const Tool.Invocation = &.{},
     },
+    /// One observation: the result of running one tool call.
+    tool: Tool.Output,
 };
 
 pub const Tool = struct {

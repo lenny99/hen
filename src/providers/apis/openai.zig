@@ -2,12 +2,42 @@ const std = @import("std");
 
 pub const Role = enum { system, user, assistant, tool, developer };
 
-pub const Message = struct { role: Role, content: []const u8 };
+pub const MessageFn = struct {
+    name: []const u8,
+    arguments: []const u8,
+};
+
+/// One tool call in an assistant message of the conversation payload.
+pub const ToolCallEntry = struct {
+    id: []const u8,
+    type: []const u8 = "function",
+    function: MessageFn,
+};
+
+/// One function tool in the `tools` array of the request.
+pub const FunctionTool = struct {
+    type: []const u8 = "function",
+    function: struct {
+        name: []const u8,
+        description: []const u8,
+        parameters: std.json.Value,
+    },
+};
+
+pub const Message = struct {
+    role: Role,
+    content: []const u8,
+    /// Assistant messages carry the calls of the action round.
+    tool_calls: ?[]const ToolCallEntry = null,
+    /// Tool messages carry the id of the call they answer.
+    tool_call_id: ?[]const u8 = null,
+};
 
 pub const Create = struct {
     model: []const u8,
     stream: bool,
     messages: []Message,
+    tools: ?[]const FunctionTool = null,
 };
 
 /// One event from a streamed Responses API response. The server sends one
@@ -190,6 +220,17 @@ pub const Chunk = struct {
             if (content.len > 0) return content;
         }
         return null;
+    }
+
+    /// The first choice's tool call fragments, or none when this chunk carries
+    /// no tool call traffic.
+    pub fn toolCalls(self: *const Chunk) []const ToolCall {
+        for (self.choices orelse return &.{}) |choice| {
+            const delta = choice.delta orelse continue;
+            const calls = delta.tool_calls orelse continue;
+            if (calls.len > 0) return calls;
+        }
+        return &.{};
     }
 
     /// The first non-null `finish_reason`, which arrives on the chunk that ends

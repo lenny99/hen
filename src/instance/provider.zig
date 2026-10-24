@@ -5,11 +5,18 @@ const msg = @import("message.zig");
 
 const Delta = msg.Delta;
 
-const session_mod = @import("session.zig");
-pub const ToolDef = session_mod.ToolDef;
-
 pub const ModelId = []const u8;
 pub const SystemPrompt = []const u8;
+
+/// One function tool in the request `tools` array.
+pub const ToolSpec = struct {
+    name: []const u8,
+    description: []const u8,
+    parameters: std.json.Value,
+};
+
+/// Backwards-compatible name for the provider tool descriptor.
+pub const ToolDef = ToolSpec;
 
 pub const Provider = struct {
     pub const Error = error{ConnectionError} || std.Io.Cancelable || std.mem.Allocator.Error;
@@ -20,7 +27,7 @@ pub const Provider = struct {
         /// The conversation so far. The slices are valid only for the duration
         /// of the `stream` call; a provider that keeps them must copy them.
         messages: []const msg.Message,
-        tools: []const ToolDef,
+        tools: []const ToolSpec,
         session: uuid.UUID,
     };
 

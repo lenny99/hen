@@ -1,4 +1,4 @@
-//! A minimal terminal chat loop for exercising the agent core end to end.
+//! A minimal terminal chat loop for exercising the instance core end to end.
 //!
 //! One line per turn; the assistant reply is printed after each turn. The loop
 //! ends at EOF or on the line `exit`. The provider token comes from
@@ -7,7 +7,7 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
-const agent = @import("agent");
+const instance = @import("instance");
 const http = @import("http");
 const provider = @import("provider");
 
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("hen: set OPENCODE_API_KEY to an opencode token\n", .{});
         return error.MissingToken;
     };
-    const token = agent.Secret{ .name = "opencode", .value = token_value };
+    const token = instance.Secret{ .name = "opencode", .value = token_value };
 
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
 
     const generator = uuid.Generator.init(gpa, io);
     const id = try generator.v4();
-    var session = try agent.Session.init(id, &backend);
+    var session = try instance.Session.init(id, &backend);
     defer session.deinit(gpa);
 
     const stdout = std.Io.File.stdout();
@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
         if (session.messages.items.len > before) {
             switch (session.messages.items[session.messages.items.len - 1]) {
                 .assistant => |assistant| try writer.print("{s}\n", .{assistant.content}),
+                .tool => {},
                 .user => {},
             }
             try writer.flush();

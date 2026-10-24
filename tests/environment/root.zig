@@ -1,10 +1,10 @@
-const chicken = @import("chicken");
+const environment = @import("environment");
 
 const std = @import("std");
 
 const allocator = std.testing.allocator;
 
-const Interpreter = chicken.Interpreter;
+const Interpreter = environment.Interpreter;
 
 test "evaluate Scheme through the Chicken interpreter" {
     const interpreter = try Interpreter.init(.{});
@@ -49,7 +49,7 @@ test "reject embedded NUL bytes" {
     );
     try std.testing.expectError(
         error.InvalidCString,
-        interpreter.load(allocator, "src/chicken/testdata/load.scm\x00ignored"),
+        interpreter.load(allocator, "src/environment/testdata/load.scm\x00ignored"),
     );
 }
 
@@ -57,6 +57,6 @@ test "load a Scheme file through the Zig API" {
     const interpreter = try Interpreter.init(.{});
     var output: [64]u8 = undefined;
 
-    try interpreter.load(allocator, "src/chicken/testdata/load.scm");
+    try interpreter.load(allocator, "src/environment/testdata/load.scm");
     try std.testing.expectEqualStrings("99", try interpreter.eval(allocator, "loaded-through-zig", &output));
 }

@@ -7,31 +7,42 @@ pub fn build(b: *std.Build) void {
     const chicken_build = LibChicken.build(b);
     b.getInstallStep().dependOn(chicken_build.step);
 
-    const chicken_module = b.addModule("chicken", .{
-        .root_source_file = b.path("src/chicken/root.zig"),
+    const environment_module = b.addModule("environment", .{
+        .root_source_file = b.path("src/environment/root.zig"),
         .target = target,
         .link_libc = true,
     });
-    (&chicken_build).link(chicken_module);
-    const chicken_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/chicken/root.zig"),
+    (&chicken_build).link(environment_module);
+    const environment_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/environment/root.zig"),
         .target = target,
         .link_libc = true,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "chicken", .module = chicken_module },
+            .{ .name = "environment", .module = environment_module },
         },
     });
-    (&chicken_build).link(chicken_test_module);
+    (&chicken_build).link(environment_test_module);
 
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
 
-    const agent_module = b.addModule("agent", .{
-        .root_source_file = b.path("src/agent/root.zig"),
+    const generations_module = b.addModule("generations", .{
+        .root_source_file = b.path("src/generations/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "environment", .module = environment_module },
+        },
+    });
+
+    const instance_module = b.addModule("instance", .{
+        .root_source_file = b.path("src/instance/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "uuid", .module = uuid.module("uuid") },
+            .{ .name = "environment", .module = environment_module },
+            .{ .name = "generations", .module = generations_module },
         },
     });
 
@@ -42,12 +53,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const agent_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/agent/session.zig"),
+    const instance_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/instance/session.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent", .module = agent_module },
+            .{ .name = "instance", .module = instance_module },
             .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
         },
     });
@@ -57,7 +68,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent", .module = agent_module },
+            .{ .name = "instance", .module = instance_module },
             .{ .name = "http", .module = http_module },
         },
     });
@@ -67,7 +78,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent", .module = agent_module },
+            .{ .name = "instance", .module = instance_module },
             .{ .name = "provider", .module = provider_module },
             .{ .name = "http", .module = http_module },
             .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
@@ -81,7 +92,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "agent", .module = agent_module },
+                .{ .name = "instance", .module = instance_module },
                 .{ .name = "http", .module = http_module },
                 .{ .name = "provider", .module = provider_module },
                 .{ .name = "uuid", .module = uuid.module("uuid") },
@@ -102,25 +113,32 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const chicken_tests = b.addTest(.{
-        .name = "chicken-tests",
-        .root_module = chicken_test_module,
+    const env_tests = b.addTest(.{
+        .name = "environment-tests",
+        .root_module = environment_test_module,
     });
 
-    const run_chicken_tests = b.addRunArtifact(chicken_tests);
+    const run_env_tests = b.addRunArtifact(env_tests);
+
+    const generation_tests = b.addTest(.{
+        .name = "generation-tests",
+        .root_module = generations_module,
+    });
+
+    const run_generation_tests = b.addRunArtifact(generation_tests);
 
     const session_tests = b.addTest(.{
-        .name = "agent-session-tests",
-        .root_module = agent_test_module,
+        .name = "instance-session-tests",
+        .root_module = instance_test_module,
     });
 
     const run_session_tests = b.addRunArtifact(session_tests);
 
-    const agent_tests = b.addTest(.{
-        .root_module = agent_module,
+    const instance_tests = b.addTest(.{
+        .root_module = instance_module,
     });
 
-    const run_agent_tests = b.addRunArtifact(agent_tests);
+    const run_instance_tests = b.addRunArtifact(instance_tests);
 
     const provider_tests = b.addTest(.{
         .name = "provider-tests",
@@ -136,8 +154,9 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_chicken_tests.step);
-    test_step.dependOn(&run_agent_tests.step);
+    test_step.dependOn(&run_env_tests.step);
+    test_step.dependOn(&run_generation_tests.step);
+    test_step.dependOn(&run_instance_tests.step);
     test_step.dependOn(&run_session_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_provider_tests.step);

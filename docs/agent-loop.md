@@ -2,9 +2,10 @@
 
 Draft for discussion. Research on the vendored CHICKEN C API, the tool-calling
 wire format, and prior art is folded in. The M1 bridge prototype is done and
-tested: `scheme/env.scm` plus `src/chicken/env.zig`, 46 of 46 tests pass.
+tested: `scheme/env.scm` plus `src/environment/env.zig`, 46 of 46 tests pass.
 
-The design is split into ten phases.
+The design is split into ten phases. The plugin-facing surface, the forms a
+Scheme tool module writes against, is drafted in `docs/plugin-api.md`.
 
 ## Phase #1. Goal
 
@@ -28,13 +29,13 @@ user message
 
 ## Phase #2. What exists today
 
-- `src/agent`: `Session` holds a user/assistant transcript. `run` streams one
+- `src/instance`: `Session` holds a user/assistant transcript. `run` streams one
   turn and folds text deltas. `ToolDef` and the `tool_invocation` and
   `tool_return` delta kinds exist, but nothing executes tools.
 - `src/providers`: OpenAI-compatible streaming over opencode zen
   (`go/v1/chat/completions`). `Chunk` parses `delta.tool_calls` fragments, but
   the generator drops them. The request payload has no `tools` field.
-- `src/chicken`: `Interpreter` wraps `CHICKEN_initialize`, `CHICKEN_run`,
+- `src/environment`: `Interpreter` wraps `CHICKEN_initialize`, `CHICKEN_run`,
   `CHICKEN_eval_string_to_string`, `CHICKEN_load`, `CHICKEN_get_error_message`,
   and `CHICKEN_yield`. Eval writes into one fixed caller buffer. A failed eval
   cannot be retried with a larger buffer without running side effects twice.
@@ -117,9 +118,9 @@ transcript, and the same provider. The parent runs the child loop to
 completion inside the tool call. The model drives branching through tools:
 spawn, promote, discard. The full protocol is in Phase #9.
 
-Today's code maps to this: `src/chicken` plus `scheme/env.scm` is
-`environment`; `src/agent` is `instance`; `generations` is new. Rename the
-modules during M2.
+Today's code maps to this: `src/environment` plus `scheme/env.scm` is
+`environment`; `src/instance` is `instance`; `generations` is new. The module
+rename landed in M2.
 
 ## Phase #4. Loop protocol
 
@@ -156,7 +157,7 @@ Research is done against the vendored tree (`vendors/chicken-core`,
 
 ### Module and API
 
-The bridge is the `environment` module of Phase #3: today's `src/chicken`
+The bridge is the `environment` module of Phase #3: today's `src/environment`
 plus `scheme/env.scm`, renamed in M2. Its public surface is three
 functions: start the runtime, list the tools, run one action.
 
@@ -190,7 +191,7 @@ pub const Environment = struct {
 
 - `init` starts one CHICKEN runtime on the calling thread and loads the
   given Scheme modules (`scheme/env.scm` today). Every later call must run
-  on that thread. `src/chicken/root.zig` enforces it and returns
+  on that thread. `src/environment/root.zig` enforces it and returns
   `error.WrongThread`.
 - `tools` returns the tool descriptors for the provider `tools` array. It
   runs at session start, and again after a generation swap. `.name` and
@@ -200,13 +201,13 @@ pub const Environment = struct {
 - `call` runs one action and returns its observation as caller-owned text.
   A tool error is an observation that starts with `Error: `, not a Zig
   error.
-- `Error` is the set in `src/chicken/root.zig`: allocation failure plus
+- `Error` is the set in `src/environment/root.zig`: allocation failure plus
   `InitializationFailed`, `InvalidCString`, `OutputBufferTooSmall`,
   `SchemeError`, `StringTooLarge`, `WrongThread`. `call` converts
   `SchemeError` and `OutputBufferTooSmall` into observations. The other
   errors propagate.
 - There is no `deinit`. CHICKEN has no shutdown call, so the runtime lives
-  until the process exits (`src/chicken/root.zig`).
+  until the process exits (`src/environment/root.zig`).
 - The environment handles one call at a time.
 - Phase #9 adds a `load` entry for the generation swap. It runs on the same
   thread and follows the same rules.
@@ -231,7 +232,7 @@ decode the top-level string literal        -> observation text
 
 The first eval runs the action and stores its result inside Scheme. The
 second eval reads it back. This two-phase fetch is `Env.call` with
-`decodeResult` in `src/chicken/env.zig`.
+`decodeResult` in `src/environment/env.zig`.
 
 ### Across the bridge
 

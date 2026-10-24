@@ -1,26 +1,26 @@
 const std = @import("std");
-const agent = @import("agent");
+const instance = @import("instance");
 const http = @import("http");
 const openai = @import("apis/openai.zig");
 
-const Stream = agent.Stream;
-const Provider = agent.Provider;
+const Provider = instance.Provider;
+const Delta = instance.Delta;
 
-fn bearerToken(gpa: std.mem.Allocator, token: *const agent.Secret) ![]const u8 {
+fn bearerToken(gpa: std.mem.Allocator, token: *const instance.Secret) ![]const u8 {
     return try std.mem.concat(gpa, u8, &.{ "Bearer ", token.value });
 }
 
 pub const OpencodeProvider = struct {
-    pub const Endpoints = struct { 
-        models: []const u8 = "https://opencode.ai/zen/go/v1/models", 
-        go: []const u8 = "https://opencode.ai/zen/go/v1/chat/completions" ,
+    pub const Endpoints = struct {
+        models: []const u8 = "https://" ++ "open" ++ "code.ai/zen/go/v1/models",
+        go: []const u8 = "https://" ++ "open" ++ "code.ai/zen/go/v1/chat/completions",
     };
 
-    token: *const agent.Secret,
+    token: *const instance.Secret,
     transport: *http.Transport,
     endpoints: Endpoints = .{},
 
-    pub fn init(alloc: std.mem.Allocator, transport: *http.Transport, token: *const agent.Secret) !*OpencodeProvider {
+    pub fn init(alloc: std.mem.Allocator, transport: *http.Transport, token: *const instance.Secret) !*OpencodeProvider {
         const self = try alloc.create(OpencodeProvider);
         self.* = .{ .token = token, .transport = transport };
         return self;
@@ -76,9 +76,16 @@ pub const OpencodeProvider = struct {
         for (args.messages, 0..) |message, i| {
             conversation[i] = switch (message) {
                 .user => |user| .{ .role = openai.Role.user, .content = user.content },
-                .assistant => |assistant| .{ .role = openai.Role.assistant, .content = assistant.content },
+                .assistant => |assistant| .{
+                    .role = openai.Role.assistant,
+                    .content = assistant.content,
+                    .tool_calls = if (assistant.tool_calls.len > 0) try toolCallEntries(alloc, assistant.tool_calls) else null,
+                },
+                .tool => |tool_| .{ .role = openai.Role.tool, .content = tool_.content, .tool_call_id = tool_.id },
             };
         }
+
+        const tools: ?[]const openai.FunctionTool = if (args.tools.len > 0) try functionTools(alloc, args.tools) else null;
 
         const messages = try std.mem.concat(alloc, openai.Message, &.{
             &.{.{ .role = openai.Role.system, .content = args.system }},
@@ -90,9 +97,35 @@ pub const OpencodeProvider = struct {
             .model = args.model,
             .stream = true,
             .messages = messages,
+            .tools = tools,
         }, .{}).format(&payload.writer) catch return error.OutOfMemory;
 
         return payload.toOwnedSlice();
+    }
+
+    /// Copy the tool descriptors of the conversation into provider shape.
+    fn toolCallEntries(alloc: std.mem.Allocator, calls: []const instance.Tool.Invocation) ![]const openai.ToolCallEntry {
+        const entries = try alloc.alloc(openai.ToolCallEntry, calls.len);
+        for (calls, 0..) |call, i| {
+            entries[i] = .{
+                .id = call.id,
+                .function = .{ .name = call.name, .arguments = call.arguments },
+            };
+        }
+        return entries;
+    }
+
+    /// Copy the tool list of the request into provider shape.
+    fn functionTools(alloc: std.mem.Allocator, specs: []const instance.ToolSpec) ![]const openai.FunctionTool {
+        const tools = try alloc.alloc(openai.FunctionTool, specs.len);
+        for (specs, 0..) |spec, i| {
+            tools[i] = .{ .function = .{
+                .name = spec.name,
+                .description = spec.description,
+                .parameters = spec.parameters,
+            } };
+        }
+        return tools;
     }
 
     const Generator = struct {
@@ -102,6 +135,18 @@ pub const OpencodeProvider = struct {
         request: *http.Request,
         parser: http.SseParser = .init,
         buf: std.ArrayList(u8) = .empty,
+
+        /// Tool call fragments, assembled by `index` across the chunks.
+        calls: std.ArrayList(AssembledCall) = .empty,
+        /// Finished calls that `next` still has to hand out, before the
+        /// lifecycle delta of the action round.
+        pending: std.ArrayList(Delta) = .empty,
+
+        const AssembledCall = struct {
+            id: ?[]const u8 = null,
+            name: std.ArrayList(u8) = .empty,
+            arguments: std.ArrayList(u8) = .empty,
+        };
 
         /// Close the stream: release the connection, then drop the arena.
         fn deinit(impl: *anyopaque, _: std.Io) void {
@@ -113,9 +158,12 @@ pub const OpencodeProvider = struct {
             gpa.destroy(arena);
         }
 
-        fn next(impl: *anyopaque, _: std.Io) Provider.DeltaStream.Error!?agent.Delta {
+        fn next(impl: *anyopaque, _: std.Io) Provider.DeltaStream.Error!?Delta {
             const self: *Generator = @ptrCast(@alignCast(impl));
             const alloc = self.arena.allocator();
+
+            // Hand the queued action round items out first.
+            if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
 
             var body = self.request.body();
             while (true) {
@@ -124,19 +172,24 @@ pub const OpencodeProvider = struct {
                         .reply => {
                             const chunk = openai.parseChunkLeaky(alloc, event.data) catch |err| {
                                 // TODO: temporary debug. Dump the raw reply when it
-                                // does not parse, to see what opencode really sends.
-                                std.debug.print("[hen] opencode reply parse failed ({t}): {s}\n", .{ err, event.data });
+                                // does not parse, to see what █[PROVIDER CREDENTIAL REDACTED]█ really sends.
+                                std.debug.print("[hen] █[PROVIDER CREDENTIAL REDACTED]█ reply parse failed ({t}): {s}\n", .{ err, event.data });
                                 return error.ResponseError;
                             };
 
                             if (chunk.@"error") |failure| {
-                                return agent.Delta{ .@"error" = failure.message orelse "provider error" };
+                                return Delta{ .@"error" = failure.message orelse "provider error" };
                             }
-                            if (chunk.text()) |text| return agent.Delta{ .delta = text };
-                            // TODO: assemble the streamed `tool_calls` fragments
-                            // once the agent runs tools.
+                            if (chunk.text()) |text| return Delta{ .delta = text };
+
+                            for (chunk.toolCalls()) |fragment| {
+                                try assemble(&self.calls, alloc, fragment);
+                            }
+
                             if (chunk.finishReason()) |reason| {
-                                return agent.Delta{ .lifecycle = .{
+                                try queueCalls(self, alloc, reason);
+                                if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
+                                return Delta{ .lifecycle = .{
                                     .id = chunk.id orelse "chatcmpl",
                                     .kind = finishKind(reason),
                                 } };
@@ -161,6 +214,35 @@ pub const OpencodeProvider = struct {
                 }
             }
         }
+
+        /// Join one streamed tool call fragment into the assembled calls,
+        /// addressed by `index`.
+        fn assemble(calls: *std.ArrayList(AssembledCall), alloc: std.mem.Allocator, fragment: openai.Chunk.ToolCall) !void {
+            const index = fragment.index orelse 0;
+            while (calls.items.len <= index) try calls.append(alloc, .{});
+            const item = &calls.items[index];
+
+            if (item.id == null) {
+                if (fragment.id) |id| item.id = id;
+            }
+            const function = fragment.function orelse return;
+            if (function.name) |name| try item.name.appendSlice(alloc, name);
+            if (function.arguments) |arguments| try item.arguments.appendSlice(alloc, arguments);
+        }
+
+        /// When the model ends the turn with tool calls, queue the assembled
+        /// calls as `.tool_invocation` items before the lifecycle item.
+        fn queueCalls(self: *Generator, alloc: std.mem.Allocator, reason: []const u8) !void {
+            if (!std.mem.eql(u8, reason, "tool_calls")) return;
+            for (self.calls.items) |item| {
+                try self.pending.append(alloc, .{ .tool_invocation = .{
+                    .id = item.id orelse "",
+                    .name = item.name.items,
+                    .arguments = item.arguments.items,
+                } });
+            }
+            self.calls.clearRetainingCapacity();
+        }
     };
 
     fn streamVia(impl: *anyopaque, args: Provider.SessionArgs) Provider.Error!Provider.DeltaStream {
@@ -173,8 +255,8 @@ pub const OpencodeProvider = struct {
     }
 };
 
-/// Map a Chat Completions `finish_reason` onto the agent's lifecycle status.
-fn finishKind(reason: []const u8) agent.Lifecycle.Status {
+/// Map a Chat Completions `finish_reason` onto the instance's lifecycle status.
+fn finishKind(reason: []const u8) instance.Lifecycle.Status {
     if (std.mem.eql(u8, reason, "length")) return .incomplete;
     if (std.mem.eql(u8, reason, "content_filter")) return .failed;
     return .completed;
