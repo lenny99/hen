@@ -138,6 +138,13 @@ One user request drives zero or more action rounds:
 
 Budgets: `max_rounds` per user request, default 8, set on the session.
 
+Decided 2026-10-25: actions are Scheme expressions the model produces,
+not structured tool calls with JSON arguments. The round mechanics stay;
+how the model's expression is carried on the OpenAI-compatible wire
+(single string-parameter tool vs assistant text) is decided with the
+Phase #6 wire changes, which re-do the message and payload work that the
+tool_calls assembly in this section originally assumed.
+
 Cancellation: the stream is released as today. Environment actions run
 synchronously in the first cut, so cancellation between rounds is enough.
 Eval timeout handling is in Phase #6.
@@ -151,6 +158,12 @@ The bridge is the synchronous call channel between Zig and the CHICKEN
 runtime. It runs on one thread and it carries text. One call moves one
 action in and one observation out. Tool state stays inside Scheme. No
 conditions, no C values, and no state cross the bridge.
+
+Decided 2026-10-25: the model speaks Scheme. Actions are Scheme
+expressions; there is no structured JSON argument surface and no
+JSON-to-Scheme datum translation on the action path. The two-eval call
+path below keeps its shape; the arguments-conversion rule in "Across the
+bridge" is superseded. is decided with the Phase #6 wire changes.
 
 Research is done against the vendored tree (`vendors/chicken-core`,
 `6.0.1pre1`) and its manual. Facts carry file references.
@@ -236,7 +249,15 @@ second eval reads it back. This two-phase fetch is `Env.call` with
 
 ### Across the bridge
 
-- Arguments in. Zig converts parsed JSON (`std.json.Value`) to Scheme data
+- Arguments in (superseded 2026-10-25). Actions are Scheme expressions
+  the model produces; Zig hands the verbatim source to the runtime thread
+  under the registry's guard rails: one action in, one observation out,
+  exactly once. The JSON conversion below is the earlier decided design
+  and stays built as infrastructure pending disposition; the exact
+  dispatch form for verbatim source (and whether the registry gains a
+  dedicated entry for it) is decided in hen-82r.8.
+  Previously decided: Zig converts parsed JSON (`std.json.Value`) to
+  Scheme data text:
   text: objects to alists, arrays to lists, strings to escaped literals,
   numbers, booleans, and null as-is. The dispatch evals the datum quoted:
   `(hen:tools/call! "<name>" '<args>)`. Object keys become symbols. Keys that

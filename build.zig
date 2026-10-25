@@ -24,6 +24,17 @@ pub fn build(b: *std.Build) void {
     });
     (&chicken_build).link(environment_test_module);
 
+    const environment_env_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/environment/env.zig"),
+        .target = target,
+        .link_libc = true,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "environment", .module = environment_module },
+        },
+    });
+    (&chicken_build).link(environment_env_test_module);
+
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
 
@@ -120,6 +131,20 @@ pub fn build(b: *std.Build) void {
 
     const run_env_tests = b.addRunArtifact(env_tests);
 
+    const env_bridge_tests = b.addTest(.{
+        .name = "environment-env-tests",
+        .root_module = environment_env_test_module,
+    });
+
+    const run_env_bridge_tests = b.addRunArtifact(env_bridge_tests);
+
+    const env_render_tests = b.addTest(.{
+        .name = "environment-render-tests",
+        .root_module = environment_module,
+    });
+
+    const run_env_render_tests = b.addRunArtifact(env_render_tests);
+
     const generation_tests = b.addTest(.{
         .name = "generation-tests",
         .root_module = generations_module,
@@ -155,6 +180,8 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_env_tests.step);
+    test_step.dependOn(&run_env_bridge_tests.step);
+    test_step.dependOn(&run_env_render_tests.step);
     test_step.dependOn(&run_generation_tests.step);
     test_step.dependOn(&run_instance_tests.step);
     test_step.dependOn(&run_session_tests.step);

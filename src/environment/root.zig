@@ -200,3 +200,10 @@ pub const Environment = struct {
         return self.call_fn(self.impl, io, allocator, name, arguments);
     }
 };
+
+pub const Env = @import("env.zig").Env;
+pub const ToolDesc = @import("env.zig").ToolDesc;
+
+test {
+    _ = @import("env.zig");
+}
