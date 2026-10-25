@@ -139,11 +139,22 @@ One user request drives zero or more action rounds:
 Budgets: `max_rounds` per user request, default 8, set on the session.
 
 Decided 2026-10-25: actions are Scheme expressions the model produces,
-not structured tool calls with JSON arguments. The round mechanics stay;
-how the model's expression is carried on the OpenAI-compatible wire
-(single string-parameter tool vs assistant text) is decided with the
-Phase #6 wire changes, which re-do the message and payload work that the
-tool_calls assembly in this section originally assumed.
+carried on the OpenAI-compatible wire as a single function tool with one
+string parameter; the model's Scheme expression rides that one string
+parameter. This keeps the action rounds native on the wire:
+`finish_reason` `tool_calls` ends the turn, `tool_call_id` pairs each
+observation with its call, and the existing `delta.tool_calls` assembly
+by `index` stays. It also preserves the budget forcing of the steps
+above: glm supports `tool_choice` `auto` only, so spending the round
+budget omits the tools array instead of forcing a wire-level
+`tool_choice`. Assistant text never carries actions; that alternative
+was rejected because plain text has no call-id pairing for one
+observation per action and no wire way to force a final answer. The
+exact wire naming and packaging of the tool, and the message mapping,
+are Phase #6 work implementing this decision. The round mechanics of
+this section are unchanged: assemble tool calls by `index`, append one
+assistant message that carries the call, and append one observation
+message per call.
 
 Cancellation: the stream is released as today. Environment actions run
 synchronously in the first cut, so cancellation between rounds is enough.
@@ -162,8 +173,26 @@ conditions, no C values, and no state cross the bridge.
 Decided 2026-10-25: the model speaks Scheme. Actions are Scheme
 expressions; there is no structured JSON argument surface and no
 JSON-to-Scheme datum translation on the action path. The two-eval call
-path below keeps its shape; the arguments-conversion rule in "Across the
-bridge" is superseded. is decided with the Phase #6 wire changes.
+path below keeps its shape. The bridge hands the model's expression to
+a new registry entry `hen:eval!` as one string. `hen:eval!` reads
+exactly one expression from that string (trailing text yields an
+`Error: ` observation), evals it inside `handle-exceptions`, and
+resolves the stored observation: when the expression stores its own
+observation — every `hen:tools/call!` path does — `hen:eval!` leaves
+it in place and returns its length; otherwise it stores the written
+result of the expression and returns that length. The store or leave
+choice must be detected rather than inferred from the returned value,
+because a bare fixnum result aliases the length protocol. Raw verbatim
+eval of the expression at the bridge is rejected on two counts: it cannot guarantee
+that the stored observation belongs to this action, because a
+non-`call!` numeric result aliases the length protocol and
+`(hen:tools/fetch)` returns the previous action's observation; and
+quote-embedding raw source lets one unbalanced `)` split the wrapper
+into an unguarded second top-level form. Carrying the expression as one
+string is provably one form and reuses the existing escaper. The
+first-cut model action expression is one `hen:tools/call!` invocation
+with a Scheme datum tail; the `call!` contract and the handler's `arg`
+reading carry over.
 
 Research is done against the vendored tree (`vendors/chicken-core`,
 `6.0.1pre1`) and its manual. Facts carry file references.
@@ -185,7 +214,6 @@ for a later optimization: `CHICKEN_read`, `CHICKEN_apply`
 pub const ToolDesc = struct {
     name: []const u8,
     description: []const u8,
-    parameters: std.json.Value,
 };
 
 pub const Environment = struct {
@@ -197,8 +225,7 @@ pub const Environment = struct {
 
     pub fn call(self: *Environment,
                 allocator: std.mem.Allocator,
-                name: []const u8,
-                args: std.json.Value) Error![]u8;
+                source: []const u8) Error![]u8;
 };
 ```
 
@@ -206,14 +233,14 @@ pub const Environment = struct {
   given Scheme modules (`scheme/env.scm` today). Every later call must run
   on that thread. `src/environment/root.zig` enforces it and returns
   `error.WrongThread`.
-- `tools` returns the tool descriptors for the provider `tools` array. It
-  runs at session start, and again after a generation swap. `.name` and
-  `.description` go to the provider as they are. `.parameters` is the JSON
-  Schema for the arguments; the bridge renders it from the shape that the
-  registry declares.
-- `call` runs one action and returns its observation as caller-owned text.
-  A tool error is an observation that starts with `Error: `, not a Zig
-  error.
+- `tools` returns the tool descriptors: a name and description catalog.
+  It runs at session start, and again after a generation swap. The
+  consumer is the Phase #6 request framing, which packages the one
+  string-parameter function tool; it is not a per-tool provider array.
+- `call` runs one action from the model's source string and returns its
+  observation as caller-owned text: one expression in, one observation
+  out. A tool error is an observation that starts with `Error: `, not a
+  Zig error.
 - `Error` is the set in `src/environment/root.zig`: allocation failure plus
   `InitializationFailed`, `InvalidCString`, `OutputBufferTooSmall`,
   `SchemeError`, `StringTooLarge`, `WrongThread`. `call` converts
@@ -233,31 +260,34 @@ The Scheme side is the registry of Phase #5:
 hen:tools/list         -> ((name description shape) ...)
 hen:tools/call!        -> stored result length
 hen:tools/fetch        -> stored result string
+hen:eval!              -> stored result length
 ```
 
 One `call` runs two evals on the runtime thread:
 
 ```text
-eval "(hen:tools/call! \"name\" '<args>)"  -> stored result length
-eval "(hen:tools/fetch)"                   -> written string literal
-decode the top-level string literal        -> observation text
+eval "(hen:eval! \"<model expression>\")"  -> stored result length
+eval "(hen:tools/fetch)"                  -> written string literal
+decode the top-level string literal       -> observation text
 ```
 
-The first eval runs the action and stores its result inside Scheme. The
-second eval reads it back. This two-phase fetch is `Env.call` with
-`decodeResult` in `src/environment/env.zig`.
+The first eval runs the action and leaves its result stored inside
+Scheme: an expression that stores its own observation leaves it, and
+`hen:eval!` stores the written result otherwise. The second eval reads
+it back. This two-phase fetch is `Env.call` with `decodeResult` in
+`src/environment/env.zig`.
 
 ### Across the bridge
 
-- Arguments in (superseded 2026-10-25). Actions are Scheme expressions
-  the model produces; Zig hands the verbatim source to the runtime thread
-  under the registry's guard rails: one action in, one observation out,
-  exactly once. The JSON conversion below is the earlier decided design
-  and stays built as infrastructure pending disposition; the exact
-  dispatch form for verbatim source (and whether the registry gains a
-  dedicated entry for it) is decided in hen-82r.8.
-  Previously decided: Zig converts parsed JSON (`std.json.Value`) to
-  Scheme data text:
+- Arguments in (decided 2026-10-25). Actions are Scheme expressions the
+  model produces. Zig hands the source to the runtime thread as one
+  string. The string is untrusted text, and `hen:eval!` enforces the
+  single-expression rule: it reads exactly one expression from the
+  string, and trailing text yields an `Error: ` observation. The
+  disposition of the JSON conversion below is removed (hen-82r.8): the
+  string carry replaces it, and no consumer survives. Previously
+  decided, now the removed prior design: Zig converts parsed JSON
+  (`std.json.Value`) to Scheme data text:
   text: objects to alists, arrays to lists, strings to escaped literals,
   numbers, booleans, and null as-is. The dispatch evals the datum quoted:
   `(hen:tools/call! "<name>" '<args>)`. Object keys become symbols. Keys that
@@ -281,9 +311,12 @@ second eval reads it back. This two-phase fetch is `Env.call` with
   units are not confirmed in the static build. A small pure-Scheme JSON
   writer is the fallback when a tool must return JSON to the model.
 - Errors. `(hen:tools/call! ...)` catches every condition and stores
-  `Error: <message>` as the result. A failed eval at the bridge maps to the
-  same shape (`Env.errorObservation`). The model sees the message and can
-  retry. Errors never cross the bridge as conditions.
+  `Error: <message>` as the result. `(hen:eval! ...)` catches every
+  condition the same way, including the trailing-text and read failures,
+  and produces the same `Error: ` observation shape. A failed eval at
+  the bridge maps to the same shape (`Env.errorObservation`). The model
+  sees the message and can retry. Errors never cross the bridge as
+  conditions.
 
 ### Inside the runtime
 
@@ -335,6 +368,16 @@ Provider payload, `src/providers`:
 - glm supports `tool_choice` `auto` only, so the budget forces the final answer
   by omitting the `tools` array, not by `tool_choice` `none`.
 
+Decided 2026-10-25 (hen-82r.8): `Create.tools` becomes one function tool with a
+single required string parameter, the model's Scheme action source — action
+rounds stay native on the wire. The `delta.tool_calls` assembly by `index` and
+the `.tool_invocation` deltas above stay. `Tool.Invocation.arguments` carries
+the model's Scheme source text as one string, not JSON arguments. The
+conversation mapping (assistant `tool_calls` + `role: "tool"` with
+`tool_call_id`) stays. Budget forcing now means omitting the one tool (the glm
+`tool_choice` `auto` note stays). The tools-array population and the
+Env→`Environment` adapter are hen-82r.4 work against this decision.
+
 ## Phase #7. Errors, budgets, safety
 
 - A tool error is an observation, not a failure of the turn.
@@ -349,6 +392,14 @@ access, writes only in the workspace and temporary directories, and a 60 second
 timeout (`docs/architecture.org`, "Workspace and workers"). hen does not apply
 that policy now. It stays the reference for the later sandbox in the
 environment.
+
+Decided 2026-10-25 (hen-82r.8): actions are model-authored Scheme evaluated in
+the runtime's interaction environment with the hen process's permissions; the
+"No sandbox policy now" line above now describes the action channel itself.
+Today's guard rails are protocol-level only: one expression per action,
+evaluated exactly once, `Error: ` observations on failure, no retry, and no
+eval timeout. The sandbox stays a later, environment-owned mechanism; Autolith
+remains the reference.
 
 ## Phase #8. Generations and branching
 

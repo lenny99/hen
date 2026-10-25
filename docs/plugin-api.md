@@ -89,7 +89,12 @@ The registry side stays as Phase #5 wrote it:
 hen:tools/list         -> ((name description shape) ...)
 hen:tools/call!        -> stored result length
 hen:tools/fetch        -> stored result string
+hen:eval!              -> stored result length
 ```
+
+`hen:eval!` (added 2026-10-25, hen-82r.8) takes the model's action expression
+as one string and is the dispatch entry the two-eval call path runs; see the
+agent-loop doc, Call path.
 
 A plugin handler receives one datum and returns one value. Tool state lives in
 the module and persists for the session (Phase #5, Inside the runtime).
@@ -112,15 +117,18 @@ Three kinds: module, tool, skill. A record holds:
 
 | Level | Content | Where it appears | Budget |
 |---|---|---|---|
-| L0 | name, summary, `when`, argument shape | every request, in the provider `tools` array | 240 characters per tool, 8 KiB for the whole array |
+| L0 | name, summary, `when` — for the one action tool entry | every request, in the provider `tools` array | 240 characters per entry, 8 KiB for the whole array |
 | L1 | name, summary, description, for one module's tools and skills | `hen-help <module>` | 600 characters per entry |
 | L2 | the full record: description, usage, examples, contract, links | `hen-help <module> <item>` | 4 KiB per item |
 | L3 | a skill body | `hen-skill` | 8 KiB per skill |
 
-Decided: L0 is the floor, not a choice. The provider array always carries name,
-`description`, and `parameters`, so a tool cannot opt out of being listed. The
-`description` field holds `summary` plus `when`. Everything above L0 is pulled,
-and a pull costs the session tokens once.
+Decided: L0 is the floor, not a choice. The provider array is not per-tool:
+since hen-82r.8 it carries one action tool entry (the string-parameter
+action tool, section 7), so the level budget is about that entry, not about
+listing every tool. Where the L0 catalog text enters the request — the system
+prompt or the single entry's description — is Phase #6 wiring (hen-82r.4).
+The `description` field holds `summary` plus `when`. Everything above L0 is
+pulled, and a pull costs the session tokens once.
 
 Decided: the documentation store is Scheme state and crosses the ordinary
 bridge. There is no second channel and no C value; a help answer is an
@@ -199,8 +207,12 @@ budget.
 - `description` is model-facing. At L0 it holds `summary` plus `when`, at most
   240 characters (section 4). The whole tool list is sent every round, so the
   level budget keeps the request bounded.
-- `parameters` is the JSON Schema the bridge renders from the declared shape.
-  The plugin declares the shape once; Zig does not hand-write schemas.
+- ~~`parameters` is the JSON Schema the bridge renders from the declared
+  shape.~~ Removed 2026-10-25 (hen-82r.8): there is no per-tool provider
+  `parameters`; the bridge renders no schemas. The provider array carries one
+  string-parameter action tool whose parameter is the model's Scheme
+  expression, and its exact packaging is Phase #6 wiring (hen-82r.4). The
+  name and description rules above stay as catalog rules for that entry.
 
 Decided: the registry is frozen for a request. Tools change only at a
 generation swap, which is when `tools` is recomputed (Phase #5). A plugin that
@@ -208,27 +220,25 @@ registers during a run changes the next request, not the current one.
 
 ## 8. Arguments
 
-Decided 2026-10-25 (agent-loop direction change): model actions are
-Scheme expressions. The structured JSON argument surface here — §7
-parameter schemas and this section's shape subset + datum conversion —
-is pending disposition (keep as infrastructure, deprecate, or remove),
-decided with the agent-loop channel decision (hen-82r.8). The registry
-entries in section 3 and the handler contract below (`arg`, untrusted
-text, handler validates) carry over for any structured path that
-survives.
+Decided 2026-10-25 (hen-82r.8): model actions are Scheme expressions. The
+structured JSON argument surface here — §7 parameter schemas and this
+section's shape subset and datum conversion — is removed. The bridge renders
+no schemas and converts no JSON. Reasons: no consumer survives the channel
+decision, and the JSON layer is an intermediary the operator removed. The
+recovery point for the removed code and text is hen-82r.3 (commit 6fd7c3b).
+What carries over: the registry entries in section 3, the handler contract
+below (`arg`, untrusted text, handler validates), and `#:shape` as declared
+registry and documentation data.
 
-The shape subset the bridge renders and converts:
-
-- types: `string`, `number`, `integer`, `boolean`, `array`, `object`, `enum`
-- keywords: `type`, `properties`, `items`, `enum`, `description`, `required`
-- no `$ref`, `anyOf`, `allOf`, `oneOf`. The model cannot resolve them and the
-  bridge has no schema walker.
-
-Arguments cross as a datum, converted by the escaper already specified in
-Phase #5: object to alist, array to list, string to an escaped literal, keys as
-symbols, keys that do not read back as symbols inside pipes. Handlers read with
-`arg`, which returns a default when a key is absent, and a tool answers a
-missing required argument with an observation, not a Scheme error.
+Removed 2026-10-25 (hen-82r.8). None of that runs now. The bridge used to
+render a declared shape as a JSON Schema subset — types `string`, `number`,
+`integer`, `boolean`, `array`, `object`, `enum`; keywords `type`,
+`properties`, `items`, `enum`, `description`, `required`; no `$ref`,
+`anyOf`, `allOf`, `oneOf` — and convert parsed JSON to the datum the handler
+reads with `arg`: object to alist, array to list, string to an escaped
+literal, keys to symbols, keys that do not read back as symbols inside
+pipes. The action is now the model's Scheme expression as one string; see
+the agent-loop doc, Call path.
 
 Decided: arguments are untrusted text. A handler validates before it acts. The
 bridge does not type-check against the shape, so a shape is a promise to the
@@ -381,10 +391,12 @@ The manifest declares an `api` version. The bridge advertises its protocol
 version at load. A mismatch is a load failure.
 
 The stable names are the registry entries above: `hen:tools/list`,
-`hen:tools/call!`, `hen:tools/fetch`, `hen:docs/list`, `hen:docs/get`,
-`hen:docs/skill`, plus `hen:tools/load` when the swap lands (Phase #9). An api
-bump is required when any of these change, when the shape subset changes, when
-the observation prefixes change, or when a record kind gains or loses a field.
+`hen:tools/call!`, `hen:tools/fetch`, `hen:eval!`, `hen:docs/list`,
+`hen:docs/get`, `hen:docs/skill`, plus `hen:tools/load` when the swap lands
+(Phase #9). An api bump is required when any of these change, when the
+observation prefixes change, or when a record kind gains or loses a field.
+The shape subset is no longer an api surface: it was removed with the JSON
+argument surface (2026-10-25, hen-82r.8), so it cannot trigger a bump.
 
 ## 16. Non-goals
 
@@ -400,30 +412,103 @@ Zig owns.
 
 1. Is `register-tool!` the final form, or should the first cut commit to a
    `define-tool` macro and require compiled plugin sources from the start?
+
+> It's the final form for this state. Nothing is really set it stone.
+
 2. Tool naming: keep `<module>-<tool>` as a convention, or make the registry
    enforce a prefix?
+
+> Make the registry enforce the prefix
+
 3. Shape subset: keep the JSON Schema subset, or define a smaller Scheme shape
    form and render the Schema from it? The subset above is a walking subset;
    nesting depth is undecided.
+
+> I **do not** want any JSON in this. Please use scheme or sexp for serialisation.
+
+Decided 2026-10-25 (hen-82r.8): agreed and settled harder than this question
+asked — the JSON subset is removed outright; the argument on the action path
+is the model's Scheme expression as one string. `#:shape` stays as declared
+registry and documentation data, never rendered as JSON (section 8).
+
 4. Observation cap: 64 KiB default per call, or a per-session budget shared by
    the calls of one round?
+
+> Well some tools probably use a lot more memory than others. So default pre-
+> allocation with the ability to grow? What do we want to actually use from
+> the tool call? If we extract what we want and persist the tool call to a file
+> when can throw the whole call away -> Arena Allocator for the duration of
+> the tool call.
+
 5. Capabilities declared but unenforced: worth writing now, or do they arrive
    with the sandbox?
+
+> Lets defer any security. We can continue with definitng capabilities until
+> a concept is designed.
+
 6. Providers declared in a generation: needed now, or does provider selection
    stay outside the plugin layer?
+
+> I would like the provider configuration in a plugin. This mean we want to
+> declare interference endpoints and what compatible API to use, then the
+> efficiently implemented zig provider will use that configuration to access
+> the endpoint.
+
 7. Timing of shape B. What is the smallest step that makes promotion real: one
    worker process for a candidate, or a worker process per instance?
+
+> Maybe we should seperate between small subagents that don't have soverigninty
+> over themselves from more general subagents. When an instance spawns an agent
+> that can't spawn other agents and is only there to scout and report back to
+> the main process it should probably run in an in-process thread. A larger
+> orchestration might need independent instances that communicate via message
+> passing to their parent. The parent would then also need to monitor these.
+>
+> **This should definetly go into the second iteration**
+
 8. Long host jobs: synchronous host calls only (section 10), or a deferred
    request shape where a plugin returns "run this" and the host resumes?
+
+> Plugins **always** run in the instances environment. Not their own environments.
+
 9. Lessons records: visible to the next branch's plugins, or only to the parent
    instance?
+
+> Lets defer the whole lesson thing to a separate design document.
+
 10. Levels: is four enough, and does L1 need to exist at all, or can `hen-help`
    jump straight from a module list to a full record?
+
+> I think help should have several uses:
+>  - get general API interface of a module (internal or plugins)
+>  - search for symbols with nearest string search (fff?) so that even when
+>    the search term doesnt quite fit it still finds the function
+>  - pull up the description for a single function with different levels
+>    of documentation. even showing the described source code when requested
+
 11. `hen-help` and `hen-skill` as two tools, or one tool with modes? Two costs
    two array entries at L0; one costs one but carries a mode argument.
+
+> as per the last answer we should probably enrich ´help´ in general
+
 12. Does a skill carry a checklist the model is expected to follow, or only
    prose? A checklist is inspectable, and nothing checks that it was followed.
+
+> tool skills should be guidence on how to use the tool so that the tool calls
+> dont loop with slightly wrong parameter usage
+
 13. Level budgets: fixed numbers, or a per-generation budget declared in the
    manifest and checked by the gate?
+
+> Let's not do budgets right now
+
 14. Should the argument shape shrink at L0 for tools with many arguments, so a
    wide tool costs less in every request, with the full shape at L2?
+
+> What does that mean?
+
+(The question meant rendering a condensed schema at L0 and the full one at
+L2 so a wide tool costs less per request.) Decided 2026-10-25 (hen-82r.8):
+moot — there is no per-tool provider argument shape anymore. The one action
+tool entry is constant across requests; its cost does not vary with tool
+complexity (section 7).

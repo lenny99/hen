@@ -20,7 +20,8 @@ pub const Tool = struct {
         /// the value a tool result is matched against.
         id: []const u8,
         name: []const u8,
-        /// The call arguments as the provider sent them: raw JSON text.
+        /// The call arguments as the provider sent them: the model's Scheme
+        /// expression text carried as the single string parameter.
         arguments: []const u8,
     };
 

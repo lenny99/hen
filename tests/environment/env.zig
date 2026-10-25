@@ -92,35 +92,6 @@ test "list tools as provider-ready descriptors" {
     }
 }
 
-test "render tool shapes as JSON schemas" {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var env = try environment.Env.init(arena.allocator(), registry_and_fixture);
-    const descs = try env.tools(arena.allocator());
-
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"text to echo\"}},\"required\":[\"text\"]}",
-        try std.json.Stringify.valueAlloc(arena.allocator(), descs[0].parameters, .{}),
-    );
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\"}",
-        try std.json.Stringify.valueAlloc(arena.allocator(), descs[1].parameters, .{}),
-    );
-}
-
-test "reject a shape outside the subset" {
-    var env = try environment.Env.init(allocator, registry_and_fixture);
-    var output: [256]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'bad #:description \"Bad shape.\" #:shape '(type object (pattern x)) #:handler (lambda (args) \"nope\"))",
-        &output,
-    );
-
-    try std.testing.expectError(error.SchemeError, env.tools(allocator));
-}
-
 test "list an empty registry" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -135,154 +106,6 @@ test "propagate module load failures as errors" {
         error.SchemeError,
         environment.Env.init(allocator, &.{ registry_path, "src/environment/testdata/absent.scm" }),
     );
-}
-
-test "render nested object shapes with variadic clauses" {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var env = try environment.Env.init(arena.allocator(), registry_and_fixture);
-    var output: [2048]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-nested #:description \"Nested.\" #:shape '(type object (properties (filters (type object) (properties (kind (type string)) (limit (type integer))) (required kind limit)) (name (type string))) (required filters name)) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    const descs = try env.tools(arena.allocator());
-    var found = false;
-    for (descs) |desc| {
-        if (!std.mem.eql(u8, desc.name, "hen-nested")) continue;
-        found = true;
-        try std.testing.expectEqualStrings(
-            "{\"type\":\"object\",\"properties\":{\"filters\":{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"kind\",\"limit\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"filters\",\"name\"]}",
-            try std.json.Stringify.valueAlloc(arena.allocator(), desc.parameters, .{}),
-        );
-    }
-    try std.testing.expect(found);
-}
-
-test "read pipe-quoted property keys" {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var env = try environment.Env.init(arena.allocator(), registry_and_fixture);
-    var output: [2048]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-pipe #:description \"Piped.\" #:shape '(type object (properties (|user id| (type string)) (|a\\|b| (type integer))) (required |user id|)) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    const descs = try env.tools(arena.allocator());
-    var found = false;
-    for (descs) |desc| {
-        if (!std.mem.eql(u8, desc.name, "hen-pipe")) continue;
-        found = true;
-        try std.testing.expectEqualStrings(
-            "{\"type\":\"object\",\"properties\":{\"user id\":{\"type\":\"string\"},\"a|b\":{\"type\":\"integer\"}},\"required\":[\"user id\"]}",
-            try std.json.Stringify.valueAlloc(arena.allocator(), desc.parameters, .{}),
-        );
-    }
-    try std.testing.expect(found);
-}
-
-test "render an enum shape as its enum array alone" {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var env = try environment.Env.init(arena.allocator(), registry_and_fixture);
-    var output: [2048]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-enum #:description \"Enums.\" #:shape '(type enum (enum \"left\" right 3)) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    const descs = try env.tools(arena.allocator());
-    var found = false;
-    for (descs) |desc| {
-        if (!std.mem.eql(u8, desc.name, "hen-enum")) continue;
-        found = true;
-        try std.testing.expectEqualStrings(
-            "{\"enum\":[\"left\",\"right\",3]}",
-            try std.json.Stringify.valueAlloc(arena.allocator(), desc.parameters, .{}),
-        );
-    }
-    try std.testing.expect(found);
-}
-
-test "reject an enum shape without an enum clause" {
-    var env = try environment.Env.init(allocator, registry_and_fixture);
-    var output: [256]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-enumless #:description \"Enumless.\" #:shape '(type enum) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    try std.testing.expectError(error.SchemeError, env.tools(allocator));
-}
-
-test "reject an unknown shape type" {
-    var env = try environment.Env.init(allocator, registry_and_fixture);
-    var output: [256]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-dated #:description \"Dated.\" #:shape '(type date) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    try std.testing.expectError(error.SchemeError, env.tools(allocator));
-}
-
-test "read hex-escaped pipe keys from written forms" {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var env = try environment.Env.init(arena.allocator(), registry_and_fixture);
-    var output: [2048]u8 = undefined;
-    _ = try env.interpreter.eval(
-        arena.allocator(),
-        "(register-tool! 'hen-hex #:description \"Hexes.\" #:shape '(type object (properties (|héllo wörld| (type string)))) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    const descs = try env.tools(arena.allocator());
-    var found = false;
-    for (descs) |desc| {
-        if (!std.mem.eql(u8, desc.name, "hen-hex")) continue;
-        found = true;
-        try std.testing.expectEqualStrings(
-            "{\"type\":\"object\",\"properties\":{\"héllo wörld\":{\"type\":\"string\"}}}",
-            try std.json.Stringify.valueAlloc(arena.allocator(), desc.parameters, .{}),
-        );
-    }
-    try std.testing.expect(found);
-}
-
-test "improper dots in written shapes fail closed" {
-    var env = try environment.Env.init(allocator, registry_and_fixture);
-    var output: [256]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-dot #:description \"Dot.\" #:shape (cons 'type 'x) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    try std.testing.expectError(error.SchemeError, env.tools(allocator));
-}
-
-test "hex escapes past the reader bound fail closed" {
-    var env = try environment.Env.init(allocator, registry_and_fixture);
-    var output: [2048]u8 = undefined;
-    _ = try env.interpreter.eval(
-        allocator,
-        "(register-tool! 'hen-bounded #:description \"Bounded.\" #:shape '(type object (properties (|𠀀 x| (type string)))) #:handler (lambda (args) \"ok\"))",
-        &output,
-    );
-
-    try std.testing.expectError(error.SchemeError, env.tools(allocator));
 }
 
 test "the reader reads raw control bytes inside string literals" {
@@ -311,27 +134,13 @@ test "the reader reads raw control bytes inside string literals" {
     );
 }
 
-test "numbers the renderer emits read back as numbers" {
-    const interpreter = try registry();
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var output: [64]u8 = undefined;
-
-    for ([_][]const u8{ "1e5", "-0.5", "0.5", "1.5e-3", "99999999999999999999" }) |numeral| {
-        const number_form = try std.fmt.allocPrint(a, "(number? {s})", .{numeral});
-        try std.testing.expectEqualStrings("#t", try interpreter.eval(a, number_form, &output));
-    }
-}
-
 test "call echoes the observation as decoded text" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"text\":\"hello via call\"}", .{});
-    const observation = try env.call(a, "hen-echo", parsed.value);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-echo\" '((text . \"hello via call\")))");
     try std.testing.expectEqualStrings("hello via call", observation);
 }
 
@@ -341,7 +150,7 @@ test "call returns a tool error as an Error observation" {
     const a = arena.allocator();
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    const observation = try env.call(a, "hen-boom", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-boom\" '())");
     try std.testing.expectEqualStrings("Error: boom", observation);
 }
 
@@ -351,7 +160,7 @@ test "call returns unknown tools as Error observations" {
     const a = arena.allocator();
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    const observation = try env.call(a, "hen-ghost", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-ghost\" '())");
     try std.testing.expectEqualStrings("Error: unknown tool: hen-ghost", observation);
 }
 
@@ -361,8 +170,57 @@ test "call runs the action exactly once across two dispatches" {
     const a = arena.allocator();
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    try std.testing.expectEqualStrings("1", try env.call(a, "hen-tick", .null));
-    try std.testing.expectEqualStrings("2", try env.call(a, "hen-tick", .null));
+    try std.testing.expectEqualStrings("1", try env.call(a, "(hen:tools/call! \"hen-tick\" '())"));
+    try std.testing.expectEqualStrings("2", try env.call(a, "(hen:tools/call! \"hen-tick\" '())"));
+}
+
+test "call evals a non-call expression and stores its written result" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try std.testing.expectEqualStrings("3", try env.call(a, "(+ 1 2)"));
+}
+
+test "call turns a raised model error into an Error observation" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const observation = try env.call(a, "(error \"model boom\")");
+    try std.testing.expectEqualStrings("Error: model boom", observation);
+}
+
+test "call rejects trailing text after the expression" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const observation = try env.call(a, "(+ 1 2) junk");
+    try std.testing.expectEqualStrings("Error: trailing input after the expression", observation);
+}
+
+test "call rejects a source with no expression" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const observation = try env.call(a, "");
+    try std.testing.expectEqualStrings("Error: no expression", observation);
+}
+
+test "call leaves a call! observation in place and fetches its length" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-echo\" '((text . \"left in place\")))");
+    try std.testing.expectEqualStrings("left in place", observation);
 }
 
 test "call decodes a non-string result through its written form" {
@@ -374,7 +232,7 @@ test "call decodes a non-string result through its written form" {
     var env = try environment.Env.init(a, registry_and_fixture);
     _ = try env.interpreter.eval(a, "(register-tool! 'hen-num #:handler (lambda (args) 42))", &output);
 
-    const observation = try env.call(a, "hen-num", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-num\" '())");
     try std.testing.expectEqualStrings("42", observation);
 }
 
@@ -391,13 +249,10 @@ test "call round-trips mixed args byte for byte" {
         &output,
     );
 
-    const parsed = try std.json.parseFromSlice(
-        std.json.Value,
+    const observation = try env.call(
         a,
-        "{\"s\":\"a\\\"b\\nd\",\"z\":\"a\\u0000b\",\"i\":3,\"x\":1.5,\"b\":true,\"f\":false,\"n\":null,\"arr\":[1,\"two\",false],\"o\":{\"in\":true}}",
-        .{},
+        "(hen:tools/call! \"hen-args\" '((s . \"a\\\"b\\nd\") (z . \"a\\x00;b\") (i . 3) (x . 1.5) (b . #t) (f . #f) (n . null) (arr 1 \"two\" #f) (o (in . #t))))",
     );
-    const observation = try env.call(a, "hen-args", parsed.value);
     try std.testing.expectEqualStrings(
         "((s . \"a\\\"b\\nd\") (z . \"a\\x00;b\") (i . 3) (x . 1.5) (b . #t) (f . #f) (n . null) (arr 1 \"two\" #f) (o (in . #t)))",
         observation,
@@ -417,7 +272,7 @@ test "call decodes a NUL through the written form" {
         &output,
     );
 
-    const observation = try env.call(a, "hen-nul", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-nul\" '())");
     try std.testing.expectEqual(@as(usize, 3), observation.len);
     try std.testing.expectEqualSlices(u8, &.{ 0x61, 0x00, 0x62 }, observation);
 }
@@ -430,11 +285,12 @@ test "call round-trips multi-byte characters byte for byte" {
     const unit = "é€日";
     var payload: std.ArrayList(u8) = .empty;
     for (0..100) |_| try payload.appendSlice(a, unit);
-    var object: std.json.ObjectMap = .{};
-    try object.put(a, "text", .{ .string = payload.items });
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    const observation = try env.call(a, "hen-echo", .{ .object = object });
+    const observation = try env.call(
+        a,
+        try std.fmt.allocPrint(a, "(hen:tools/call! \"hen-echo\" '((text . \"{s}\")))", .{payload.items}),
+    );
     try std.testing.expectEqualStrings(payload.items, observation);
 }
 
@@ -451,7 +307,7 @@ test "call round-trips the writer's whole escape set" {
         &output,
     );
 
-    const observation = try env.call(a, "hen-dense", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-dense\" '())");
     try std.testing.expectEqualSlices(u8, &.{ '"', '\\', 7, 8, 9, 10, 11, 12, 13 }, observation);
 }
 
@@ -463,11 +319,12 @@ test "call round-trips a large observation through the sized scratch" {
     const unit = "aé€日";
     var payload: std.ArrayList(u8) = .empty;
     for (0..12_000) |_| try payload.appendSlice(a, unit);
-    var object: std.json.ObjectMap = .{};
-    try object.put(a, "text", .{ .string = payload.items });
 
     var env = try environment.Env.init(a, registry_and_fixture);
-    const observation = try env.call(a, "hen-echo", .{ .object = object });
+    const observation = try env.call(
+        a,
+        try std.fmt.allocPrint(a, "(hen:tools/call! \"hen-echo\" '((text . \"{s}\")))", .{payload.items}),
+    );
     try std.testing.expectEqual(@as(usize, 108_000), observation.len);
     try std.testing.expectEqualStrings(payload.items, observation);
 }
@@ -485,7 +342,7 @@ test "call returns an empty observation" {
         &output,
     );
 
-    const observation = try env.call(a, "hen-empty", .null);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-empty\" '())");
     try std.testing.expectEqual(@as(usize, 0), observation.len);
 }
 
@@ -498,7 +355,7 @@ const WrongThreadProbe = struct {
 };
 
 fn probeForeignThread(probe: *WrongThreadProbe) void {
-    if (probe.env.call(allocator, "hen-tick", .null)) |_| {} else |err| probe.call_err = err;
+    if (probe.env.call(allocator, "(hen:tools/call! \"hen-tick\" '())")) |_| {} else |err| probe.call_err = err;
     if (probe.env.tools(allocator)) |_| {} else |err| probe.tools_err = err;
     if (probe.env.errorObservation(allocator, error.SchemeError)) |observation| {
         probe.empty_fallback = observation;
@@ -534,8 +391,7 @@ test "call turns a result over the scratch slack into a buffer-too-small observa
         &output,
     );
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"n\":31}", .{});
-    const observation = try env.call(a, "hen-fat", parsed.value);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-fat\" '((n . 31)))");
     try std.testing.expectEqualStrings("Error: result buffer too small", observation);
 }
 
@@ -555,8 +411,7 @@ test "call round-trips a result within the scratch slack" {
     var expected: std.ArrayList(u8) = .empty;
     for (0..30) |_| try expected.appendSlice(a, "\xf0\x9f\xbf\xbf");
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"n\":30}", .{});
-    const observation = try env.call(a, "hen-fat", parsed.value);
+    const observation = try env.call(a, "(hen:tools/call! \"hen-fat\" '((n . 30)))");
     try std.testing.expectEqualStrings(expected.items, observation);
 }
 

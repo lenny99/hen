@@ -5,6 +5,7 @@
 
 (define *tools* '())
 (define *stored* "")
+(define *stored-fresh* #f)
 
 (define (name->string name)
   (if (symbol? name) (symbol->string name) name))
@@ -26,6 +27,7 @@
       (else (scan (cdr rest))))))
 
 (define (store! text)
+  (set! *stored-fresh* #t)
   (set! *stored* text)
   (string-length text))
 
@@ -60,6 +62,31 @@
           (store! (condition-text condition))
           (store! (written ((vector-ref entry 3) args))))
         (store! (string-append "Error: unknown tool: " (name->string name))))))
+
+(define (trailing-input? port)
+  (let loop ()
+    (let ((char (read-char port)))
+      (cond
+        ((eof-object? char) #f)
+        ((char-whitespace? char) (loop))
+        (else #t)))))
+
+(define (hen:eval! source)
+  (set! *stored-fresh* #f)
+  (handle-exceptions condition
+    (store! (condition-text condition))
+    (with-input-from-string source
+      (lambda ()
+        (let ((word (read)))
+          (cond
+            ((eof-object? word) (store! "Error: no expression"))
+            ((trailing-input? (current-input-port))
+             (store! "Error: trailing input after the expression"))
+            (else
+             (let ((value (eval word)))
+               (if *stored-fresh*
+                   (string-length *stored*)
+                   (store! (written value)))))))))))
 
 (define (hen:tools/fetch)
   *stored*)
