@@ -432,3 +432,34 @@ test "errorObservation turns bridge failures into Error observations" {
     defer allocator.free(too_small);
     try std.testing.expectEqualStrings("Error: result buffer too small", too_small);
 }
+
+test "asEnvironment runs the arguments as the source" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const bridge = env.asEnvironment();
+    try std.testing.expectEqualStrings("3", try bridge.call(std.testing.io, a, "hen-eval", "(+ 1 2)"));
+}
+
+test "asEnvironment returns a bad source as an Error observation" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const bridge = env.asEnvironment();
+    const observation = try bridge.call(std.testing.io, a, "hen-eval", "(+ 1 2) junk");
+    try std.testing.expectEqualStrings("Error: trailing input after the expression", observation);
+}
+
+test "asEnvironment ignores the tool name" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    const bridge = env.asEnvironment();
+    try std.testing.expectEqualStrings("3", try bridge.call(std.testing.io, a, "not-a-wire-name", "(+ 1 2)"));
+}

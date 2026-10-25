@@ -184,3 +184,22 @@ test "openai parses a chat completions error chunk" {
 
     try std.testing.expectEqualStrings("boom", chunk.@"error".?.message.?);
 }
+
+test "openai parses a chat completions tool call chunk" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const chunk = try openai.parseChunkLeaky(arena.allocator(),
+        "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
+        "\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0," ++
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"hen-eval\"," ++
+        "\"arguments\":\"(+ 1 2)\"}}]},\"finish_reason\":\"tool_calls\"}]}\n");
+
+    const calls = chunk.toolCalls();
+    try std.testing.expectEqual(@as(usize, 1), calls.len);
+    try std.testing.expectEqual(@as(?u32, 0), calls[0].index);
+    try std.testing.expectEqualStrings("call_1", calls[0].id.?);
+    try std.testing.expectEqualStrings("hen-eval", calls[0].function.?.name.?);
+    try std.testing.expectEqualStrings("(+ 1 2)", calls[0].function.?.arguments.?);
+    try std.testing.expectEqualStrings("tool_calls", chunk.finishReason().?);
+}

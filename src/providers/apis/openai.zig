@@ -38,6 +38,7 @@ pub const Create = struct {
     stream: bool,
     messages: []Message,
     tools: ?[]const FunctionTool = null,
+    tool_choice: ?[]const u8 = null,
 };
 
 /// One event from a streamed Responses API response. The server sends one

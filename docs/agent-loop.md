@@ -378,6 +378,44 @@ conversation mapping (assistant `tool_calls` + `role: "tool"` with
 `tool_choice` `auto` note stays). The tools-array population and the
 Env→`Environment` adapter are hen-82r.4 work against this decision.
 
+Decided 2026-10-25 (hen-82r.4 implementation): the tools-array population and
+the Env→`Environment` adapter above landed. What shipped:
+
+- The one action tool is wire name `hen-eval` (`Session.action_tool_name`) with
+  one required string parameter, `source` — the model's Scheme expression.
+  `ToolSpec` carries name and description only; the provider layer renders the
+  fixed schema (object, one string property `source`, `required` containing it).
+- `Create.tool_choice` exists (`?[]const u8`) but is never set: budget forcing
+  stays omitting the `tools` array (the forced turn sends it empty). The glm
+  `tool_choice` `auto`-only note stays.
+- `Tool.Output` carries `name` on the transcript (call id, name, content), but
+  it is not serialized: the wire pairs observations by `tool_call_id` alone,
+  which is how the (call id, name, content) requirement above is met.
+- The L0 catalog text enters the single entry's `description`
+  (`Session.action_tool_description`, 214 characters), not the system prompt.
+  Assembly from `register-tool!` records waits until records carry
+  `summary`/`when` (Phase #8) — the registry is empty today, and `Env.tools()`
+  stays its listing API.
+- Null optional fields are not emitted (`emit_null_optional_fields = false` in
+  the payload builder): request bodies contain no `"tools": null`,
+  `"tool_calls": null`, `"tool_call_id": null`, or `"tool_choice": null`;
+  budget forcing is a true omission of `tools`.
+- The generator queues the action round's `.tool_invocation` items before the
+  turn's `.lifecycle` completed delta (a round with queued calls previously
+  dropped its lifecycle delta — fixed while pinning).
+- `scheme/env.scm` and the vendored CHICKEN import stubs load cwd-relative, so
+  tests and `zig build run` run from the repo root; binary-install relocation
+  is deferred to packaging.
+
+Decided 2026-10-25 (hen-82r.10): real models send `function.arguments` as the
+JSON envelope `{"source": ...}` around the model's action text. The session
+decodes the envelope's `source` member exactly once at the instance boundary
+(`Session.runAction`), before the first eval; raw text arguments keep
+working; an object without a string `source` yields an `Error:` observation
+and the environment is not called, so a decode failure runs no eval.
+`Tool.Invocation.arguments` on the transcript stays exactly what the model
+sent. `Env.call` keeps taking raw source.
+
 ## Phase #7. Errors, budgets, safety
 
 - A tool error is an observation, not a failure of the turn.

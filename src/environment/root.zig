@@ -170,8 +170,8 @@ fn resultSlice(output: []u8) Error![]u8 {
 }
 
 /// One synchronous call into an environment: Zig sends one action (the
-/// model's Scheme expression as one text; the vtable folds name+arguments
-/// into one source string in Phase #6) and reads back one observation.
+/// adapter passes `arguments` as the model's Scheme source and ignores
+/// `name`) and reads back one observation.
 ///
 /// The first cut runs the bridge synchronously on the main thread; the call
 /// stays on the thread that initialized the CHICKEN runtime.

@@ -324,9 +324,14 @@ const MockEnvironment = struct {
         const self: *MockEnvironment = @ptrCast(@alignCast(impl));
         self.calls += 1;
         self.last_name = name;
-        self.last_arguments = arguments;
+        alloc.free(self.last_arguments);
+        self.last_arguments = try alloc.dupe(u8, arguments);
         if (self.fail) return error.Failed;
         return try alloc.dupe(u8, "observation text");
+    }
+
+    fn deinit(self: *MockEnvironment, alloc: std.mem.Allocator) void {
+        alloc.free(self.last_arguments);
     }
 
     fn asEnvironment(self: *MockEnvironment) instance.Environment {
@@ -344,10 +349,11 @@ test "the request loop runs each action round until a text-only answer" {
     var env = MockEnvironment{};
     const env_holder = env.asEnvironment();
     session.environment = &env_holder;
+    defer env.deinit(alloc);
 
     try f.mock.queue(alloc, &.{
         &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{\"city\":\"berlin\"}" } },
+            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
             .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
         },
         &.{.{ .done = "All done." }},
@@ -378,10 +384,11 @@ test "a failed action becomes an observation" {
     var env = MockEnvironment{ .fail = true };
     const env_holder = env.asEnvironment();
     session.environment = &env_holder;
+    defer env.deinit(alloc);
 
     try f.mock.queue(alloc, &.{
         &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{}" } },
+            .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
             .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
         },
         &.{.{ .done = "Handled." }},
@@ -420,4 +427,174 @@ test "the session asks for a final answer when the round budget is spent" {
     try expect(f.mock.call.?.tools).toBeEmpty();
     try expect(session.messages.items[3].user.content).toEqual(instance.Session.final_answer_prompt);
     try expect(session.messages.items[4].assistant.content).toEqual("final answer");
+}
+
+test "run hands the provider the one action tool" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "(+ 1 2)" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), f.mock.calls);
+    const call = f.mock.call.?;
+    try expect(call.tools).toHaveLength(1);
+    try expect(call.tools[0].name).toEqual(instance.Session.action_tool_name);
+    try std.testing.expect(call.tools[0].description.len > 0);
+    try std.testing.expect(instance.Session.action_tool_description.len <= 240);
+
+    try std.testing.expectEqual(@as(usize, 4), session.messages.items.len);
+    const observation = session.messages.items[2].tool;
+    try std.testing.expectEqualStrings("call_1", observation.id);
+    try std.testing.expectEqualStrings("hen-eval", observation.name);
+    try std.testing.expectEqualStrings("observation text", observation.content);
+}
+
+test "an envelope argument hands the environment the decoded source" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), env.calls);
+    try std.testing.expectEqualStrings("(+ 1 2)", env.last_arguments);
+    try std.testing.expectEqualStrings("observation text", session.messages.items[2].tool.content);
+}
+
+test "a raw argument reaches the environment unchanged" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "(+ 1 2)" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), env.calls);
+    try std.testing.expectEqualStrings("(+ 1 2)", env.last_arguments);
+    try std.testing.expectEqualStrings("observation text", session.messages.items[2].tool.content);
+}
+
+test "an object argument without source yields an error observation without a call" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "{}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), env.calls);
+    try std.testing.expectEqualStrings("Error: tool call arguments missing source", session.messages.items[2].tool.content);
+}
+
+test "a non-string source yields an error observation without a call" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "{\"source\": 42}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), env.calls);
+    try std.testing.expectEqualStrings("Error: tool call arguments source is not a string", session.messages.items[2].tool.content);
+}
+
+test "the assistant message keeps the raw arguments the model sent" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    const carried = session.messages.items[1].assistant;
+    try std.testing.expectEqual(@as(usize, 1), carried.tool_calls.len);
+    try std.testing.expectEqualStrings("{\"source\": \"(+ 1 2)\"}", carried.tool_calls[0].arguments);
 }

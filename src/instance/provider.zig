@@ -12,7 +12,6 @@ pub const SystemPrompt = []const u8;
 pub const ToolSpec = struct {
     name: []const u8,
     description: []const u8,
-    parameters: std.json.Value,
 };
 
 /// Backwards-compatible name for the provider tool descriptor.

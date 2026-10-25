@@ -98,7 +98,7 @@ pub const OpencodeProvider = struct {
             .stream = true,
             .messages = messages,
             .tools = tools,
-        }, .{}).format(&payload.writer) catch return error.OutOfMemory;
+        }, .{ .emit_null_optional_fields = false }).format(&payload.writer) catch return error.OutOfMemory;
 
         return payload.toOwnedSlice();
     }
@@ -117,12 +117,13 @@ pub const OpencodeProvider = struct {
 
     /// Copy the tool list of the request into provider shape.
     fn functionTools(alloc: std.mem.Allocator, specs: []const instance.ToolSpec) ![]const openai.FunctionTool {
+        const parameters = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"}},\"required\":[\"source\"]}", .{});
         const tools = try alloc.alloc(openai.FunctionTool, specs.len);
         for (specs, 0..) |spec, i| {
             tools[i] = .{ .function = .{
                 .name = spec.name,
                 .description = spec.description,
-                .parameters = spec.parameters,
+                .parameters = parameters,
             } };
         }
         return tools;
@@ -187,12 +188,13 @@ pub const OpencodeProvider = struct {
                             }
 
                             if (chunk.finishReason()) |reason| {
-                                try queueCalls(self, alloc, reason);
-                                if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
-                                return Delta{ .lifecycle = .{
+                                const end = Delta{ .lifecycle = .{
                                     .id = chunk.id orelse "chatcmpl",
                                     .kind = finishKind(reason),
                                 } };
+                                try queueCalls(self, alloc, reason, end);
+                                if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
+                                return end;
                             }
                         },
                         .error_reply => return error.Failed,
@@ -232,7 +234,7 @@ pub const OpencodeProvider = struct {
 
         /// When the model ends the turn with tool calls, queue the assembled
         /// calls as `.tool_invocation` items before the lifecycle item.
-        fn queueCalls(self: *Generator, alloc: std.mem.Allocator, reason: []const u8) !void {
+        fn queueCalls(self: *Generator, alloc: std.mem.Allocator, reason: []const u8, end: Delta) !void {
             if (!std.mem.eql(u8, reason, "tool_calls")) return;
             for (self.calls.items) |item| {
                 try self.pending.append(alloc, .{ .tool_invocation = .{
@@ -242,6 +244,7 @@ pub const OpencodeProvider = struct {
                 } });
             }
             self.calls.clearRetainingCapacity();
+            try self.pending.append(alloc, end);
         }
     };
 

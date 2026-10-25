@@ -39,13 +39,19 @@ const glm51 = Model{ .provider = "opencode", .name = "glm-5.3-flash", .context =
 pub const Session = struct {
     pub const Id = uuid.UUID;
 
+    pub const action_tool_name = "hen-eval";
+
+    pub const action_tool_description =
+        "Run exactly one Scheme expression per call: pass one complete expression as source. " ++
+        "Results and observations come back as text; errors start with Error:. " ++
+        "Tools are called like (hen:tools/call! \"name\" '((k . \"v\"))).";
+
     id: Id,
     provider: *const Provider,
     model: *const Model,
 
     system: SystemPrompt,
     messages: std.ArrayList(Message),
-    tools: std.ArrayList(ToolSpec),
 
     /// The environment that runs one action per call. `null` means no tools
     /// are executable; the session then never sends a tool list either.
@@ -62,7 +68,6 @@ pub const Session = struct {
             .model = &glm51,
             .system = "",
             .messages = .empty,
-            .tools = .empty,
             .environment = null,
         };
     }
@@ -114,7 +119,7 @@ pub const Session = struct {
             .model = self.model.id(),
             .system = self.system,
             .messages = self.messages.items,
-            .tools = if (self.environment != null and with_tools) self.tools.items else &.{},
+            .tools = if (self.environment != null and with_tools) &action_tools else &.{},
             .session = self.id,
         });
         defer stream.deinit(io);
@@ -203,16 +208,54 @@ pub const Session = struct {
         const call_id = try alloc.dupe(u8, call.id);
         errdefer alloc.free(call_id);
 
-        const observation = if (self.environment) |env|
-            env.call(io, alloc, call.name, call.arguments) catch |err| switch (err) {
-                error.OutOfMemory, error.Canceled => return err,
-                else => try std.fmt.allocPrint(alloc, "Error: {t}", .{err}),
-            }
-        else
-            try alloc.dupe(u8, "Error: no environment");
+        const call_name = try alloc.dupe(u8, call.name);
+        errdefer alloc.free(call_name);
+
+        const decoded = try decodeActionSource(alloc, call.arguments);
+
+        const observation = switch (decoded) {
+            .observation => |text| text,
+            .source => |source| blk: {
+                defer alloc.free(source);
+                if (self.environment) |env|
+                    break :blk env.call(io, alloc, call.name, source) catch |err| switch (err) {
+                        error.OutOfMemory, error.Canceled => return err,
+                        else => try std.fmt.allocPrint(alloc, "Error: {t}", .{err}),
+                    };
+                break :blk try alloc.dupe(u8, "Error: no environment");
+            },
+        };
 
         // The environment returns caller-owned text, so the session keeps it.
-        return .{ .id = call_id, .content = observation };
+        return .{ .id = call_id, .name = call_name, .content = observation };
+    }
+
+    const DecodedSource = union(enum) {
+        source: []const u8,
+        observation: []const u8,
+    };
+
+    fn decodeActionSource(alloc: std.mem.Allocator, arguments: []const u8) !DecodedSource {
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return .{ .source = try alloc.dupe(u8, arguments) },
+        };
+        defer parsed.deinit();
+
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return .{ .source = try alloc.dupe(u8, arguments) },
+        };
+
+        const member = object.get("source") orelse
+            return .{ .observation = try alloc.dupe(u8, "Error: tool call arguments missing source") };
+
+        const text = switch (member) {
+            .string => |text| text,
+            else => return .{ .observation = try alloc.dupe(u8, "Error: tool call arguments source is not a string") },
+        };
+
+        return .{ .source = try alloc.dupe(u8, text) };
     }
 
     pub fn deinit(self: *Session, alloc: std.mem.Allocator) void {
@@ -229,10 +272,14 @@ pub const Session = struct {
             },
             .tool => |tool| {
                 alloc.free(tool.id);
+                alloc.free(tool.name);
                 alloc.free(tool.content);
             },
         };
         self.messages.deinit(alloc);
-        self.tools.deinit(alloc);
     }
+};
+
+const action_tools = [_]ToolSpec{
+    .{ .name = Session.action_tool_name, .description = Session.action_tool_description },
 };

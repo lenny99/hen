@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "instance", .module = instance_module },
                 .{ .name = "http", .module = http_module },
                 .{ .name = "provider", .module = provider_module },
+                .{ .name = "environment", .module = environment_module },
                 .{ .name = "uuid", .module = uuid.module("uuid") },
             },
         }),

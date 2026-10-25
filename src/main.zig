@@ -10,6 +10,7 @@ const uuid = @import("uuid");
 const instance = @import("instance");
 const http = @import("http");
 const provider = @import("provider");
+const environment = @import("environment");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -33,6 +34,10 @@ pub fn main(init: std.process.Init) !void {
     const id = try generator.v4();
     var session = try instance.Session.init(id, &backend);
     defer session.deinit(gpa);
+
+    var env = try environment.Env.init(gpa, &.{"scheme/env.scm"});
+    const bridge = env.asEnvironment();
+    session.environment = &bridge;
 
     const stdout = std.Io.File.stdout();
     var out_buffer: [4096]u8 = undefined;
@@ -68,13 +73,13 @@ pub fn main(init: std.process.Init) !void {
             continue;
         };
 
-        if (session.messages.items.len > before) {
-            switch (session.messages.items[session.messages.items.len - 1]) {
+        for (session.messages.items[before..]) |msg| {
+            switch (msg) {
                 .assistant => |assistant| try writer.print("{s}\n", .{assistant.content}),
-                .tool => {},
+                .tool => |output| try writer.print("{s}\n", .{output.content}),
                 .user => {},
             }
-            try writer.flush();
         }
+        try writer.flush();
     }
 }

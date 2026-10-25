@@ -20,8 +20,10 @@ pub const Tool = struct {
         /// the value a tool result is matched against.
         id: []const u8,
         name: []const u8,
-        /// The call arguments as the provider sent them: the model's Scheme
-        /// expression text carried as the single string parameter.
+        /// The call arguments as the provider sent them: the model's action
+        /// text carried as the single string parameter; the session decodes
+        /// the {"source": ...} JSON envelope real models send before
+        /// evaluation.
         arguments: []const u8,
     };
 
@@ -29,6 +31,7 @@ pub const Tool = struct {
     pub const Output = struct {
         /// The id of the invocation this answers.
         id: []const u8,
+        name: []const u8 = "",
         content: []const u8,
     };
 };

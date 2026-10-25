@@ -5,7 +5,7 @@ const root = @import("root.zig");
 const Interpreter = root.Interpreter;
 const Error = root.Error;
 
-/// One tool in the provider `tools` array.
+/// One registered tool listed by `hen:tools/list`.
 pub const ToolDesc = struct {
     name: []const u8,
     description: []const u8,
@@ -116,6 +116,24 @@ pub const Env = struct {
             error.OutputBufferTooSmall => return allocator.dupe(u8, "Error: result buffer too small"),
             else => return err,
         }
+    }
+
+    pub fn asEnvironment(self: *Env) root.Environment {
+        return .{ .impl = self, .call_fn = call_fn };
+    }
+
+    fn call_fn(
+        impl: *anyopaque,
+        _: std.Io,
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        arguments: []const u8,
+    ) root.Environment.CallError![]u8 {
+        const self: *Env = @ptrCast(@alignCast(impl));
+        return self.call(allocator, arguments) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Failed,
+        };
     }
 };
 
