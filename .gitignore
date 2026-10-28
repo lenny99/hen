@@ -5,6 +5,7 @@ zig-out/
 # Agents
 .autolith/
 .nodecode/
+.opencode/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
@@ -12,3 +13,4 @@ zig-out/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
