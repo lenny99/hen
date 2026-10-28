@@ -14,6 +14,14 @@ pub const OpencodeProvider = struct {
     pub const Endpoints = struct {
         models: []const u8 = "https://" ++ "open" ++ "code.ai/zen/go/v1/models",
         go: []const u8 = "https://" ++ "open" ++ "code.ai/zen/go/v1/chat/completions",
+
+        pub fn fromBase(alloc: std.mem.Allocator, base: []const u8) !Endpoints {
+            const trimmed = std.mem.trimEnd(u8, base, "/");
+            return .{
+                .models = try std.fmt.allocPrint(alloc, "{s}/models", .{trimmed}),
+                .go = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{trimmed}),
+            };
+        }
     };
 
     token: *const instance.Secret,

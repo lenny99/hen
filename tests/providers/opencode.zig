@@ -19,6 +19,28 @@ test "opencode provider initializes" {
     defer opencode.deinit(gpa);
 }
 
+test "Endpoints.fromBase composes model and chat completions urls" {
+    const gpa = std.testing.allocator;
+
+    const endpoints = try OpencodeProvider.Endpoints.fromBase(gpa, "http://127.0.0.1:8000/v1");
+    defer gpa.free(endpoints.models);
+    defer gpa.free(endpoints.go);
+
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/models", endpoints.models);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", endpoints.go);
+}
+
+test "Endpoints.fromBase trims one trailing slash" {
+    const gpa = std.testing.allocator;
+
+    const endpoints = try OpencodeProvider.Endpoints.fromBase(gpa, "http://127.0.0.1:8000/v1/");
+    defer gpa.free(endpoints.models);
+    defer gpa.free(endpoints.go);
+
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/models", endpoints.models);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", endpoints.go);
+}
+
 const MockServer = struct {
     const net = std.Io.net;
     const LOCALHOST = "127.0.0.1";

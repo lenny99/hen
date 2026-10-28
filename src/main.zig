@@ -2,7 +2,8 @@
 //!
 //! One line per turn; the assistant reply is printed after each turn. The loop
 //! ends at EOF or on the line `exit`. The provider token comes from
-//! OPENCODE_API_KEY.
+//! OPENCODE_API_KEY (optional when OPENCODE_BASE_URL is set);
+//! OPENCODE_BASE_URL and OPENCODE_MODEL override the endpoints and model.
 
 const std = @import("std");
 const uuid = @import("uuid");
@@ -16,11 +17,22 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    const token_value = init.environ_map.get("OPENCODE_API_KEY") orelse {
-        std.debug.print("hen: set OPENCODE_API_KEY to an opencode token\n", .{});
+    const base_url = init.environ_map.get("OPENCODE_BASE_URL");
+    const token_value = init.environ_map.get("OPENCODE_API_KEY") orelse blk: {
+        if (base_url) |base| {
+            if (base.len > 0) break :blk "dummy";
+        }
+        std.debug.print("hen: set OPENCODE_API_KEY to an opencode token, or point OPENCODE_BASE_URL at an OpenAI-compatible server\n", .{});
         return error.MissingToken;
     };
     const token = instance.Secret{ .name = "opencode", .value = token_value };
+
+    var model: ?instance.Model = null;
+    if (init.environ_map.get("OPENCODE_MODEL")) |model_name| {
+        if (model_name.len > 0) {
+            model = .{ .provider = "opencode", .name = model_name, .context = 300.000 };
+        }
+    }
 
     var transport = try http.Transport.init(io, gpa);
     defer transport.deinit();
@@ -28,11 +40,26 @@ pub fn main(init: std.process.Init) !void {
     const client = try provider.OpencodeProvider.init(gpa, &transport, &token);
     defer client.deinit(gpa);
 
+    var endpoint_urls: ?provider.OpencodeProvider.Endpoints = null;
+    defer {
+        if (endpoint_urls) |e| {
+            gpa.free(e.go);
+            gpa.free(e.models);
+        }
+    }
+    if (base_url) |base| {
+        if (base.len > 0) {
+            endpoint_urls = try provider.OpencodeProvider.Endpoints.fromBase(gpa, base);
+            client.endpoints = endpoint_urls.?;
+        }
+    }
+
     var backend = client.asProvider();
 
     const generator = uuid.Generator.init(gpa, io);
     const id = try generator.v4();
     var session = try instance.Session.init(id, &backend);
+    if (model) |*m| session.model = m;
     defer session.deinit(gpa);
 
     var env = try environment.Env.init(gpa, &.{"scheme/env.scm"});
