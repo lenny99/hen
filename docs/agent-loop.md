@@ -439,6 +439,34 @@ evaluated exactly once, `Error: ` observations on failure, no retry, and no
 eval timeout. The sandbox stays a later, environment-owned mechanism; Autolith
 remains the reference.
 
+Decided 2026-10-29 (hen-82r.5): the Phase #7 error and budget policy is
+verified as shipped, with no new behavior.
+
+- Tool errors are observations: `Session.runAction` maps every environment
+  error except `error.OutOfMemory` and `error.Canceled` to `Error: ` text,
+  and a failed envelope decode yields an `Error: ` observation without
+  calling the environment. `Env.errorObservation` keeps the single
+  `Error: ` prefix, actions run as one expression evaluated exactly once,
+  and there is no retry and no eval timeout.
+- Provider errors keep the history and release the stream, as today: a
+  `.lifecycle` `.failed` delta becomes `error.ResponseFailed`, an `.error`
+  delta becomes `error.ProviderFailed`, `defer stream.deinit` runs on every
+  path, and the turn appends no partial assistant message.
+  `error.Canceled` propagates separately and never becomes an observation.
+  The REPL prints `[provider error: ...]` and continues with the history
+  intact.
+- The budget forces a final answer: after `max_rounds` (default 8) the
+  session checks cancellation, appends `Session.final_answer_prompt`, and
+  runs one turn with the tool list truly omitted (the Phase #6 decision).
+  The forced turn's tool-call count is discarded, so the request always
+  ends.
+- The accepted edge: an out-of-schema tool call on that forced turn still
+  runs once under the same guard rails, and the request then ends without
+  a text answer. Accepted for now; no new behavior.
+- No sandbox and no eval timeout today. They stay with the later
+  environment-owned sandbox; Autolith (`docs/architecture.org`, "Workspace
+  and workers") remains the reference.
+
 ## Phase #8. Generations and branching
 
 A generation is an immutable snapshot: the Scheme sources, a manifest, a content
