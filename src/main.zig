@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     const client = try provider.OpencodeProvider.init(gpa, &transport, &token);
     defer client.deinit(gpa);
 
-    var endpoint_urls: ?provider.OpencodeProvider.Endpoints = null;
+    var endpoint_urls: ?provider.OpenAIProvider.Endpoints = null;
     defer {
         if (endpoint_urls) |e| {
             gpa.free(e.go);
@@ -49,8 +49,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (base_url) |base| {
         if (base.len > 0) {
-            endpoint_urls = try provider.OpencodeProvider.Endpoints.fromBase(gpa, base);
-            client.endpoints = endpoint_urls.?;
+            endpoint_urls = try provider.OpenAIProvider.Endpoints.fromBase(gpa, base);
+            client.impl.endpoints = endpoint_urls.?;
         }
     }
 
