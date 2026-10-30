@@ -37,7 +37,6 @@ pub const Event = struct {
 };
 
 pub const SseParser = struct {
-
     /// Current frame under construction.
     data: std.ArrayList(u8) = .empty,
     extra: std.ArrayList(u8) = .empty,

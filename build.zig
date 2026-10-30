@@ -7,94 +7,91 @@ pub fn build(b: *std.Build) void {
     const chicken_build = LibChicken.build(b);
     b.getInstallStep().dependOn(chicken_build.step);
 
-    const environment_module = b.addModule("environment", .{
-        .root_source_file = b.path("src/environment/root.zig"),
-        .target = target,
-        .link_libc = true,
-    });
-    (&chicken_build).link(environment_module);
-    const environment_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/environment/root.zig"),
-        .target = target,
-        .link_libc = true,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "environment", .module = environment_module },
-        },
-    });
-    (&chicken_build).link(environment_test_module);
-
-    const environment_env_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/environment/env.zig"),
-        .target = target,
-        .link_libc = true,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "environment", .module = environment_module },
-        },
-    });
-    (&chicken_build).link(environment_env_test_module);
-
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
 
-    const generations_module = b.addModule("generations", .{
-        .root_source_file = b.path("src/generations/root.zig"),
+    const factory = ModuleFactory{
+        .b = b,
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "environment", .module = environment_module },
-        },
-    });
+        .chicken = &chicken_build,
+        .test_step = b.step("test", "Run tests"),
+    };
 
-    const instance_module = b.addModule("instance", .{
-        .root_source_file = b.path("src/instance/root.zig"),
-        .target = target,
-        .imports = &.{
-            .{ .name = "uuid", .module = uuid.module("uuid") },
-            .{ .name = "environment", .module = environment_module },
-            .{ .name = "generations", .module = generations_module },
-        },
+    const environment = factory.pair(.{
+        .name = "environment",
+        .root = "src/environment/root.zig",
+        .link_libc = true,
+        .link_chicken = true,
+        .test_root = "tests/environment/root.zig",
+        .test_name = "environment-tests",
+        .test_link_libc = true,
+        .test_link_chicken = true,
     });
+    factory.testModule(environment, .{
+        .root = "tests/environment/env.zig",
+        .name = "environment-env-tests",
+        .link_libc = true,
+        .link_chicken = true,
+    });
+    factory.unitTests(environment.module, "environment-render-tests");
 
-    const http_module = b.addModule("http", .{
-        .root_source_file = b.path("src/http/root.zig"),
-        .target = target,
-        .optimize = optimize,
+    const uuid_import = std.Build.Module.Import{ .name = "uuid", .module = uuid.module("uuid") };
+    const environment_import = std.Build.Module.Import{ .name = environment.name, .module = environment.module };
+
+    const generations = factory.pair(.{
+        .name = "generations",
+        .root = "src/generations/root.zig",
+        .optimize = true,
+        .imports = &.{ environment_import, uuid_import },
+        .test_root = "tests/generations/root.zig",
+        .test_name = "generation-data-tests",
+        .test_extra_imports = &.{environment_import},
+        .test_link_libc = true,
+        .test_link_chicken = true,
+    });
+    const generations_import = std.Build.Module.Import{ .name = generations.name, .module = generations.module };
+    factory.testModule(generations, .{
+        .root = "tests/generations/load.zig",
+        .name = "generation-load-tests",
+        .extra_imports = &.{environment_import},
+        .link_libc = true,
+        .link_chicken = true,
+    });
+    factory.unitTests(generations.module, "generation-tests");
+
+    const instance = factory.module(.{
+        .name = "instance",
+        .root = "src/instance/root.zig",
+        .imports = &.{ uuid_import, environment_import, generations_import },
+    });
+    const instance_import = std.Build.Module.Import{ .name = instance.name, .module = instance.module };
+    factory.unitTests(instance.module, null);
+
+    const http = factory.module(.{
+        .name = "http",
+        .root = "src/http/root.zig",
+        .optimize = true,
         .link_libc = true,
     });
+    const http_import = std.Build.Module.Import{ .name = http.name, .module = http.module };
 
-    const instance_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/instance/session.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "instance", .module = instance_module },
-            .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
-        },
+    factory.testModule(instance, .{
+        .root = "tests/instance/session.zig",
+        .name = "instance-session-tests",
+        .extra_imports = &.{.{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") }},
     });
 
-    const provider_module = b.addModule("provider", .{
-        .root_source_file = b.path("src/providers/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "instance", .module = instance_module },
-            .{ .name = "http", .module = http_module },
-        },
+    const provider = factory.pair(.{
+        .name = "provider",
+        .root = "src/providers/root.zig",
+        .optimize = true,
+        .imports = &.{ instance_import, http_import },
+        .test_root = "tests/providers/root.zig",
+        .test_name = "provider-tests",
+        .test_extra_imports = &.{ instance_import, http_import, .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") } },
     });
-
-    const provider_test_module = b.createModule(.{
-        .root_source_file = b.path("tests/providers/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "instance", .module = instance_module },
-            .{ .name = "provider", .module = provider_module },
-            .{ .name = "http", .module = http_module },
-            .{ .name = "zig_test_framework", .module = ztf.module("zig_test_framework") },
-        },
-    });
+    const provider_import = std.Build.Module.Import{ .name = provider.name, .module = provider.module };
 
     const exe = b.addExecutable(.{
         .name = "hen",
@@ -103,11 +100,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "instance", .module = instance_module },
-                .{ .name = "http", .module = http_module },
-                .{ .name = "provider", .module = provider_module },
-                .{ .name = "environment", .module = environment_module },
-                .{ .name = "uuid", .module = uuid.module("uuid") },
+                instance_import,
+                http_import,
+                provider_import,
+                environment_import,
+                generations_import,
+                uuid_import,
             },
         }),
     });
@@ -125,70 +123,107 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const env_tests = b.addTest(.{
-        .name = "environment-tests",
-        .root_module = environment_test_module,
-    });
-
-    const run_env_tests = b.addRunArtifact(env_tests);
-
-    const env_bridge_tests = b.addTest(.{
-        .name = "environment-env-tests",
-        .root_module = environment_env_test_module,
-    });
-
-    const run_env_bridge_tests = b.addRunArtifact(env_bridge_tests);
-
-    const env_render_tests = b.addTest(.{
-        .name = "environment-render-tests",
-        .root_module = environment_module,
-    });
-
-    const run_env_render_tests = b.addRunArtifact(env_render_tests);
-
-    const generation_tests = b.addTest(.{
-        .name = "generation-tests",
-        .root_module = generations_module,
-    });
-
-    const run_generation_tests = b.addRunArtifact(generation_tests);
-
-    const session_tests = b.addTest(.{
-        .name = "instance-session-tests",
-        .root_module = instance_test_module,
-    });
-
-    const run_session_tests = b.addRunArtifact(session_tests);
-
-    const instance_tests = b.addTest(.{
-        .root_module = instance_module,
-    });
-
-    const run_instance_tests = b.addRunArtifact(instance_tests);
-
-    const provider_tests = b.addTest(.{
-        .name = "provider-tests",
-        .root_module = provider_test_module,
-    });
-
-    const run_provider_tests = b.addRunArtifact(provider_tests);
-
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_env_tests.step);
-    test_step.dependOn(&run_env_bridge_tests.step);
-    test_step.dependOn(&run_env_render_tests.step);
-    test_step.dependOn(&run_generation_tests.step);
-    test_step.dependOn(&run_instance_tests.step);
-    test_step.dependOn(&run_session_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
-    test_step.dependOn(&run_provider_tests.step);
+    factory.unitTests(exe.root_module, null);
 }
+
+const ModuleFactory = struct {
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    chicken: *const LibChicken,
+    test_step: *std.Build.Step,
+
+    const Impl = struct {
+        name: []const u8,
+        module: *std.Build.Module,
+    };
+
+    const ImplOptions = struct {
+        name: []const u8,
+        root: []const u8,
+        link_libc: ?bool = null,
+        optimize: bool = false,
+        imports: []const std.Build.Module.Import = &.{},
+        link_chicken: bool = false,
+    };
+
+    const TestOptions = struct {
+        root: []const u8,
+        name: []const u8,
+        extra_imports: []const std.Build.Module.Import = &.{},
+        link_libc: ?bool = null,
+        link_chicken: bool = false,
+    };
+
+    const PairOptions = struct {
+        name: []const u8,
+        root: []const u8,
+        link_libc: ?bool = null,
+        optimize: bool = false,
+        imports: []const std.Build.Module.Import = &.{},
+        link_chicken: bool = false,
+        test_root: []const u8,
+        test_name: []const u8,
+        test_extra_imports: []const std.Build.Module.Import = &.{},
+        test_link_libc: ?bool = null,
+        test_link_chicken: bool = false,
+    };
+
+    fn module(self: ModuleFactory, options: ImplOptions) Impl {
+        const mod = self.b.addModule(options.name, .{
+            .root_source_file = self.b.path(options.root),
+            .imports = options.imports,
+            .target = self.target,
+            .optimize = if (options.optimize) self.optimize else null,
+            .link_libc = options.link_libc,
+        });
+        if (options.link_chicken) self.chicken.link(mod);
+        return .{ .name = options.name, .module = mod };
+    }
+
+    fn pair(self: ModuleFactory, options: PairOptions) Impl {
+        const impl = self.module(.{
+            .name = options.name,
+            .root = options.root,
+            .link_libc = options.link_libc,
+            .optimize = options.optimize,
+            .imports = options.imports,
+            .link_chicken = options.link_chicken,
+        });
+        self.testModule(impl, .{
+            .root = options.test_root,
+            .name = options.test_name,
+            .extra_imports = options.test_extra_imports,
+            .link_libc = options.test_link_libc,
+            .link_chicken = options.test_link_chicken,
+        });
+        return impl;
+    }
+
+    fn testModule(self: ModuleFactory, impl: Impl, options: TestOptions) void {
+        const imports = self.b.graph.arena.alloc(std.Build.Module.Import, options.extra_imports.len + 1) catch @panic("OOM");
+        imports[0] = .{ .name = impl.name, .module = impl.module };
+        @memcpy(imports[1..], options.extra_imports);
+        const mod = self.b.createModule(.{
+            .root_source_file = self.b.path(options.root),
+            .target = self.target,
+            .optimize = self.optimize,
+            .link_libc = options.link_libc,
+            .imports = imports,
+        });
+        if (options.link_chicken) self.chicken.link(mod);
+        self.unitTests(mod, options.name);
+    }
+
+    fn unitTests(self: ModuleFactory, mod: *std.Build.Module, name: ?[]const u8) void {
+        const tests = self.b.addTest(.{
+            .name = name orelse "test",
+            .root_module = mod,
+        });
+        const run = self.b.addRunArtifact(tests);
+        self.test_step.dependOn(&run.step);
+    }
+};
 
 const LibChicken = struct {
     owner: *std.Build,

@@ -46,12 +46,92 @@ pub const Session = struct {
         "Results and observations come back as text; errors start with Error:. " ++
         "Tools are called like (hen:tools/call! \"name\" '((k . \"v\"))).";
 
+    /// One registered tool the record listing reports; the catalog lines in
+    /// the action tool description are assembled from these.
+    pub const CatalogEntry = struct {
+        name: []const u8,
+        summary: []const u8,
+        when: []const u8,
+    };
+
+    /// The collected catalog entries with methods over them.
+    pub const Catalog = struct {
+        entries: []const CatalogEntry = &.{},
+
+        pub fn init(entries: []const CatalogEntry) Catalog {
+            return .{ .entries = entries };
+        }
+
+        pub fn adopt(alloc: std.mem.Allocator, entries: []const CatalogEntry) std.mem.Allocator.Error!Catalog {
+            var owned = try alloc.alloc(CatalogEntry, entries.len);
+            var filled: usize = 0;
+            errdefer {
+                for (owned[0..filled]) |copy| freeEntry(alloc, copy);
+                alloc.free(owned);
+            }
+            for (entries, 0..) |entry, index| {
+                owned[index] = try copyEntry(alloc, entry);
+                filled += 1;
+            }
+            return .{ .entries = owned };
+        }
+
+        pub fn free(self: Catalog, alloc: std.mem.Allocator) void {
+            for (self.entries) |entry| freeEntry(alloc, entry);
+            if (self.entries.len > 0) alloc.free(self.entries);
+        }
+
+        pub fn render(self: Catalog, alloc: std.mem.Allocator, base: []const u8) std.mem.Allocator.Error![]u8 {
+            var text: std.ArrayList(u8) = .empty;
+            errdefer text.deinit(alloc);
+            try text.appendSlice(alloc, base);
+            for (self.entries) |entry| {
+                try text.appendSlice(alloc, "\n");
+                try text.appendSlice(alloc, entry.name);
+                try text.appendSlice(alloc, ": ");
+                try text.appendSlice(alloc, entry.summary);
+                try text.appendSlice(alloc, " (");
+                try text.appendSlice(alloc, entry.when);
+                try text.appendSlice(alloc, ")");
+            }
+            return text.toOwnedSlice(alloc);
+        }
+
+        fn copyEntry(alloc: std.mem.Allocator, entry: CatalogEntry) std.mem.Allocator.Error!CatalogEntry {
+            const name = try alloc.dupe(u8, entry.name);
+            errdefer alloc.free(name);
+            const summary = try alloc.dupe(u8, entry.summary);
+            errdefer alloc.free(summary);
+            const when = try alloc.dupe(u8, entry.when);
+            errdefer alloc.free(when);
+            return .{ .name = name, .summary = summary, .when = when };
+        }
+
+        fn freeEntry(alloc: std.mem.Allocator, entry: CatalogEntry) void {
+            alloc.free(entry.name);
+            alloc.free(entry.summary);
+            alloc.free(entry.when);
+        }
+    };
+
     id: Id,
     provider: *const Provider,
     model: *const Model,
 
     system: SystemPrompt,
     messages: std.ArrayList(Message),
+
+    /// The registered tool records the session adopted with `setCatalog`.
+    /// Empty until then; the action tool description stays the fixed text.
+    catalog: Catalog = .{},
+
+    /// The one function tool sent with every turn. Its description carries
+    /// the fixed contract plus one `name: summary (when)` line per catalog
+    /// entry.
+    action_tool: ToolSpec = .{ .name = action_tool_name, .description = action_tool_description },
+
+    /// Whether `catalog` and `action_tool.description` are session-owned.
+    catalog_attached: bool = false,
 
     /// The environment that runs one action per call. `null` means no tools
     /// are executable; the session then never sends a tool list either.
@@ -70,6 +150,27 @@ pub const Session = struct {
             .messages = .empty,
             .environment = null,
         };
+    }
+
+    /// Adopt the assembled catalog: one `name: summary (when)` line per
+    /// registered tool appended to the action tool description. The session
+    /// owns copies of the entries and the new description, always built from
+    /// the pristine fixed contract text. An empty registry keeps the fixed
+    /// description untouched.
+    pub fn setCatalog(self: *Session, alloc: std.mem.Allocator, entries: []const CatalogEntry) std.mem.Allocator.Error!void {
+        if (entries.len == 0) return;
+
+        const catalog = try Catalog.adopt(alloc, entries);
+        errdefer catalog.free(alloc);
+        const description = try catalog.render(alloc, action_tool_description);
+
+        if (self.catalog_attached) {
+            self.catalog.free(alloc);
+            alloc.free(self.action_tool.description);
+        }
+        self.catalog_attached = true;
+        self.catalog = catalog;
+        self.action_tool.description = description;
     }
 
     /// Append one user message. The session owns a copy of `message`.
@@ -119,7 +220,7 @@ pub const Session = struct {
             .model = self.model.id(),
             .system = self.system,
             .messages = self.messages.items,
-            .tools = if (self.environment != null and with_tools) &action_tools else &.{},
+            .tools = if (self.environment != null and with_tools) &.{self.action_tool} else &.{},
             .session = self.id,
         });
         defer stream.deinit(io);
@@ -259,6 +360,10 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session, alloc: std.mem.Allocator) void {
+        if (self.catalog_attached) {
+            self.catalog.free(alloc);
+            alloc.free(self.action_tool.description);
+        }
         for (self.messages.items) |message| switch (message) {
             .user => |user| alloc.free(user.content),
             .assistant => |assistant| {
@@ -278,8 +383,4 @@ pub const Session = struct {
         };
         self.messages.deinit(alloc);
     }
-};
-
-const action_tools = [_]ToolSpec{
-    .{ .name = Session.action_tool_name, .description = Session.action_tool_description },
 };

@@ -598,3 +598,85 @@ test "the assistant message keeps the raw arguments the model sent" {
     try std.testing.expectEqual(@as(usize, 1), carried.tool_calls.len);
     try std.testing.expectEqualStrings("{\"source\": \"(+ 1 2)\"}", carried.tool_calls[0].arguments);
 }
+
+test "setCatalog with an empty registry keeps the fixed action description" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try session.setCatalog(alloc, &.{});
+
+    try expect(session.catalog.entries).toBeEmpty();
+    try expect(session.action_tool.description).toEqual(instance.Session.action_tool_description);
+}
+
+test "setCatalog appends one catalog line per registered tool" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    const entries = [_]instance.Session.CatalogEntry{
+        .{ .name = "alpha-pin", .summary = "Returns the fixture value.", .when = "A pin tool answers one value." },
+        .{ .name = "beta-probe", .summary = "A probe.", .when = "Always." },
+    };
+    try session.setCatalog(alloc, &entries);
+
+    const expected = instance.Session.action_tool_description ++
+        "\nalpha-pin: Returns the fixture value. (A pin tool answers one value.)" ++
+        "\nbeta-probe: A probe. (Always.)";
+    try expect(session.catalog.entries).toHaveLength(2);
+    try expect(session.catalog.entries[0].name).toEqual("alpha-pin");
+    try expect(session.catalog.entries[1].when).toEqual("Always.");
+    try expect(session.action_tool.description).toEqual(expected);
+
+    const replaced = [_]instance.Session.CatalogEntry{
+        .{ .name = "gamma-x", .summary = "A later tool.", .when = "Second call." },
+    };
+    try session.setCatalog(alloc, &replaced);
+
+    try expect(session.catalog.entries).toHaveLength(1);
+    try expect(session.catalog.entries[0].name).toEqual("gamma-x");
+    try expect(session.action_tool.description).toEqual(instance.Session.action_tool_description ++
+        "\ngamma-x: A later tool. (Second call.)");
+}
+
+test "run hands the provider the cataloged action tool" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    var env = MockEnvironment{};
+    const env_holder = env.asEnvironment();
+    session.environment = &env_holder;
+    defer env.deinit(alloc);
+
+    const entries = [_]instance.Session.CatalogEntry{
+        .{ .name = "alpha-pin", .summary = "Returns the fixture value.", .when = "A pin tool answers one value." },
+    };
+    try session.setCatalog(alloc, &entries);
+
+    try f.mock.queue(alloc, &.{
+        &.{
+            .{ .tool_invocation = .{ .id = "call_1", .name = "hen-eval", .arguments = "(+ 1 2)" } },
+            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
+        },
+        &.{.{ .done = "All done." }},
+    });
+
+    try session.appendMessage(alloc, "How is the weather?");
+    try session.run(std.testing.io, alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), f.mock.calls);
+    const call = f.mock.call.?;
+    try expect(call.tools).toHaveLength(1);
+    try expect(call.tools[0].name).toEqual(instance.Session.action_tool_name);
+    const expected = instance.Session.action_tool_description ++
+        "\nalpha-pin: Returns the fixture value. (A pin tool answers one value.)";
+    try expect(call.tools[0].description).toEqual(expected);
+}

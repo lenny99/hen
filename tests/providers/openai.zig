@@ -23,8 +23,7 @@ test "openai parses a text delta event" {
 }
 
 test "openai parses a text done event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.output_text.done\",\"text\":\"the answer\"}\n");
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.output_text.done\",\"text\":\"the answer\"}\n");
     defer parsed.deinit();
 
     switch (parsed.value.kind()) {
@@ -34,8 +33,7 @@ test "openai parses a text done event" {
 }
 
 test "openai parses a function call arguments delta event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.function_call_arguments.delta\"," ++
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.function_call_arguments.delta\"," ++
         "\"arguments\":\"{\\\"city\\\":\"}\n");
     defer parsed.deinit();
 
@@ -46,8 +44,7 @@ test "openai parses a function call arguments delta event" {
 }
 
 test "openai parses a function call arguments done event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.function_call_arguments.done\"," ++
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.function_call_arguments.done\"," ++
         "\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}\n");
     defer parsed.deinit();
 
@@ -58,8 +55,7 @@ test "openai parses a function call arguments done event" {
 }
 
 test "openai parses an output item done event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.output_item.done\",\"item\":{\"id\":\"call_1\"," ++
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.output_item.done\",\"item\":{\"id\":\"call_1\"," ++
         "\"type\":\"function_call\",\"name\":\"weather\",\"call_id\":\"c1\"," ++
         "\"arguments\":\"{}\"}}\n");
     defer parsed.deinit();
@@ -93,8 +89,7 @@ test "openai parses a completed event" {
 }
 
 test "openai parses an incomplete event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.incomplete\"," ++
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.incomplete\"," ++
         "\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\"}}\n");
     defer parsed.deinit();
 
@@ -105,8 +100,7 @@ test "openai parses an incomplete event" {
 }
 
 test "openai parses a failed event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\"," ++
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\"," ++
         "\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n");
     defer parsed.deinit();
 
@@ -131,8 +125,7 @@ test "openai parses an error event" {
 }
 
 test "openai classifies an unmodelled event" {
-    var parsed = try openai.parse(std.testing.allocator,
-        "{\"type\":\"response.created\",\"sequence_number\":1}\n");
+    var parsed = try openai.parse(std.testing.allocator, "{\"type\":\"response.created\",\"sequence_number\":1}\n");
     defer parsed.deinit();
 
     try std.testing.expect(parsed.value.kind() == .other);
@@ -159,8 +152,7 @@ test "openai parses a chat completions text chunk" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const chunk = try openai.parseChunkLeaky(arena.allocator(),
-        "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
+    const chunk = try openai.parseChunkLeaky(arena.allocator(), "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n");
 
     try std.testing.expectEqualStrings("hello", chunk.text().?);
@@ -171,8 +163,7 @@ test "openai parses a chat completions finish chunk" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const chunk = try openai.parseChunkLeaky(arena.allocator(),
-        "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
+    const chunk = try openai.parseChunkLeaky(arena.allocator(), "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n");
 
     try std.testing.expectEqualStrings("stop", chunk.finishReason().?);
@@ -183,8 +174,7 @@ test "openai parses a chat completions error chunk" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const chunk = try openai.parseChunkLeaky(arena.allocator(),
-        "{\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"server_error\"}}\n");
+    const chunk = try openai.parseChunkLeaky(arena.allocator(), "{\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"server_error\"}}\n");
 
     try std.testing.expectEqualStrings("boom", chunk.@"error".?.message.?);
 }
@@ -193,8 +183,7 @@ test "openai parses a chat completions tool call chunk" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const chunk = try openai.parseChunkLeaky(arena.allocator(),
-        "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
+    const chunk = try openai.parseChunkLeaky(arena.allocator(), "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0," ++
         "\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"hen-eval\"," ++
         "\"arguments\":\"(+ 1 2)\"}}]},\"finish_reason\":\"tool_calls\"}]}\n");

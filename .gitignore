@@ -1,6 +1,7 @@
 .zig-cache/
 vendor-out/
 zig-out/
+/generations/
 
 # Agents
 .autolith/

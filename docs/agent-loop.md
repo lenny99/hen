@@ -500,6 +500,11 @@ source at load time and passes the value to the runtime.
 - CHICKEN module syntax is `(module NAME (EXPORT ...) BODY ...)`. The form
   above follows it.
 
+(A brief note: this block predates the shipped implementation — `config`
+is a procedure with `#:sources`, and the loader's wrapper grammar changed.
+The decided block below records what shipped; plugin-api sections 3 and 11
+carry the corrected forms.)
+
 The Darwin Gödel Machine keeps weaker but valid agents in its archive as
 stepping stones. A keep-only-the-best variant of it scores worse: 39.7% against
 50.0% on SWE-bench. So hen keeps valid but weaker generations too.
@@ -510,7 +515,10 @@ tests, a registry diff against the parent, and resource caps. Voyager admits
 skills after execution plus a model critic, and reports that the critic
 sometimes misjudges success. A critic may attach evidence; the deterministic
 checks decide. Evaluation is noisy, so run the gate twice when a result is
-close.
+close. (As shipped this list is refined, not replaced: resource caps are
+dropped and there is no closeness metric in a deterministic pass/fail gate —
+the decided block below has the exact order; a fresh runtime is the `hen
+gate` CLI process, while the in-process gate runs on a bare probe runtime.)
 
 A branch is a child instance on a forked generation: empty transcript, same
 provider. The fork pins the generation ID, the random seed, and the transcript
@@ -545,6 +553,67 @@ plain-text advice for the next branch. It never gates promotion.
 No production system was found that lets an agent rewrite its own toolchain
 and rolls back bad generations automatically. Treat that as unverified. Keep
 the gate explicit and the ledger intact.
+
+Decided 2026-10-30 (hen-82r.6): Phase #8 shipped the generation substrate
+under shape A (`src/generations/`, `scheme/env.scm`,
+`src/environment/env.zig`). A generation is an immutable snapshot at
+`generations/<id>/`: a `manifest.sexp` written in the subset the
+environment's written-representation parser already reads, the module
+sources under `sources/` in load order, and the tool tests under `tests/`.
+The content hash is sha256, hex, over the manifest core (api, module names
+and entries, config decls, parent, provider block — capabilities and caps
+count too) with its own hash field blanked, plus the `sources/` bytes in
+load order and the `tests/` bytes sorted by name
+(`src/generations/manifest.zig`, `computeHash`). Snapshot ids are uuid v4
+and each manifest carries its parent id. `ledger.sexp` at the generation
+root is append-only, one five-field tuple per line — `(generation ...)`
+`(parent ...) (hash ...) (status candidate|promoted|failed|discarded)`
+`(evidence ...)` — and nothing is ever deleted
+(`src/generations/ledger.zig`). Rollback repoints the `active` pointer by
+writing `.active.tmp` and renaming; `hen rollback` accepts promoted
+generations only (`src/main.zig`). `buildCandidate`/`writeCandidate` fork a
+parent eagerly: the parent's sources and tests are copied, the named module
+is added or replaced, and resolved non-secret config values are baked as
+literals while a secret's env source stays on the declaration — secrets are
+never baked into a generation file.
+
+The gate as shipped (`src/generations/gate.zig`, `run`) is deterministic and
+runs on a probe-pinned bare runtime — `Env.init` of `scheme/env.scm` only —
+with `hen:registrations/checkpoint!` before the candidate's modules load.
+Then, in order: module load; the `hen:tools/list` parse (five-field
+records); the documentation lint (module-less entries, empty summary or
+description); the smoke eval `(+ 1 2)` returning `3` through the two-eval
+bridge; the `tests/` files loaded in sorted order with `hen:assert!` raising
+on mismatch; and the registry diff against the parent's `registry.sexp`,
+written when that generation's gate passed, excluding `hen-`-prefixed
+structural names. `hen:registrations/undo!` always runs last, on failures
+too. The report is a deterministic one-line gate sexp appended to the ledger
+as the candidate's evidence; the diff is evidence only and never decides
+pass or fail. After the gate the live registry reverts to the bare
+pre-candidate state, not to the active generation: re-registering a name and
+then undoing would delete the active generation's entries, so the pipeline
+never puts one under the undo list.
+
+Out of this phase, each with its doc driver: model-facing
+spawn/promote/discard, branch child instances, seed/transcript pinning, and
+live swap plus drain wait for shape B (plugin-api section 14 "B before …",
+Phase #3 above, plugin-api section 17 oq7). The bridge `load` entry stays
+Phase #9 (Phase #5's "Phase #9 adds a `load` entry" line; plugin-api section
+15) — `hen:tools/load` is not shipped. Resource caps are dropped (plugin-api
+section 17 oq13): no budget checks exist, and "run the gate twice when a
+result is close" targets future scored, noisy evaluation — a deterministic
+pass/fail gate has no closeness metric. The lessons consumer stays deferred
+(oq9), capability enforcement deferred (oq5), and the skills lint waits for
+skills to exist (plugin-api sections 5 and 6).
+
+Accepted constraints: registration forms are toplevel-visible —
+`scheme/env.scm` ends in a toplevel `(import hen)`, so bare registration
+names work on the host and test path; model reachability of those forms
+stays a looseness until a sandbox exists. And host-material loading is
+cwd-relative: `Env.init` loads `scheme/env.scm` and the vendored
+chicken-core import stubs relative to the working directory, so hen needs a
+repo-root-like cwd even though generation module paths are absolute
+(`env.zig`).
 
 ## Sources
 

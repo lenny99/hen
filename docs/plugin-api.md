@@ -43,13 +43,13 @@ store the agent reads, so it needs no surface of its own.
 
 ## 3. Declaration forms
 
-A plugin is one flat source file. Its body registers tools at load time, and it
-carries no module wrapper and no import list — the loader supplies both.
+A plugin is one flat source file. Its body registers tools at load time, and
+it carries no module wrapper — the loader supplies the wrapper, its
+imports, and the `register-module!` call.
 
 ```scheme
-(config workspace-root :sources (env "HEN_WORKSPACE"))
-
-(register-module! #:summary "Workspace file reads and writes.")
+(define workspace-root
+  (config 'workspace-root #:sources (env "HEN_WORKSPACE")))
 
 (register-tool! 'read-file
   #:summary "Read one UTF-8 file from the workspace."
@@ -68,9 +68,9 @@ carries no module wrapper and no import list — the loader supplies both.
 ```
 
 Decided 2026-10-25 (open question 2): the loader owns the module wall. The
-manifest names each module, and the host loads each source file as
-`(module <name> (import hen-plugin) (include "<path>"))` — the
-body-as-single-string include form (`manual/Modules:82-83`). The wall matters
+manifest names each module, and the host loads each source file through a
+module wrapper — the body-as-single-string include form
+(`manual/Modules:82-83`). The wall matters
 because `hen:eval!` evaluates the model's expressions in the interaction
 environment (agent-loop doc, Phase #7): inside the wrapper, a plugin's
 internals are invisible there, and the model's only route to a tool is
@@ -78,12 +78,34 @@ internals are invisible there, and the model's only route to a tool is
 environments (`manual/Modules:101-105`), so the wrapper is a wall, not
 isolation; isolation stays a process property (section 14).
 
+Decided 2026-10-30 (hen-82r.6): the loader's actual wrapper is
+`(module <name> * (import scheme (chicken base) (chicken condition)
+(chicken port) hen-plugin) (register-module! '<name>) (include "<abs path>")
+(and #t))` (`src/environment/env.zig`, `formatWrapper`). Three refinements
+versus the malformed first-cut form `(module <name> (import hen-plugin)
+(include "<path>"))`, where `(import hen-plugin)` sat in the export-list
+position — the second operand of `module` is the export list
+(`manual/Modules:46-47`): imports come first, because interpreted module
+bodies perform `import` at transform time and the chicken sexports are the
+only source of `define`/`include`; `(register-module! '<name>)` sits inside
+the wrapper, because `##sys#current-module` is not bound at body-run time —
+the loader calls it on the plugin's behalf, and the plugin source carries
+only `register-tool!` and `config` calls; and the `(and #t)` tail keeps
+`Interpreter.eval`'s written result tiny. Separately, `*` in the
+export-list position is broken in interpreted modules for real exports
+(verified against the vendored runtime in a probe), so it is used only for
+these never-imported wrappers and every module other code imports uses an
+explicit export list. Registration forms also stay toplevel-visible:
+`scheme/env.scm` ends in a toplevel `(import hen)`, so bare registration
+names work on the host and test path — model reachability of those forms is
+an accepted looseness until a sandbox exists.
+
 Decided 2026-10-25 (open question 2): the module name lives once, in the
 manifest. `register-module!` opens the record of the module the loader named,
 and the `register-tool!` and `register-skill!` calls that follow belong to it.
-Load is serialized, so one module is open at a time. A plugin that never calls
-`register-module!` fails the gate lint: a tool with no module has no place in
-the help index.
+Load is serialized, so one module is open at a time. A source that loads
+without its module opened fails the gate lint: a tool with no module has no
+place in the help index (section 13 records today's lint scope).
 
 Decided 2026-10-25 (open question 2): the registry qualifies short tool names
 with the manifest's module name, so `register-tool! 'read-file` inside
@@ -112,8 +134,9 @@ the entry file; the includes are the plugin's own business, and the
 generation's content hash covers every included file. `load` escapes the wall:
 it hands each expression to `eval` in the interaction environment, where the
 model can reach the names, so the gate lint rejects a `load` call in plugin
-sources. A module body sees only what it imports, so `hen-plugin` re-exports
-`include-relative`.
+sources (that particular check is not implemented yet — section 13 lists
+today's lint scope). A module body sees only what it imports, so
+`hen-plugin` re-exports `include-relative`.
 
 Decided 2026-10-25: a plugin may import its declared dependencies — egg units
 the runtime resolved for the generation (section 12) — and imported bindings
@@ -124,7 +147,7 @@ import the plugin never declared fails at load, because the scoped
 The registry side stays as Phase #5 wrote it:
 
 ```text
-hen:tools/list         -> ((name description shape) ...)
+hen:tools/list         -> ((name summary when description shape) ...)
 hen:tools/call!        -> stored result length
 hen:tools/fetch        -> stored result string
 hen:eval!              -> stored result length
@@ -395,10 +418,11 @@ is one C function behind a Scheme wrapper. Nothing else.
 
 ## 11. Configuration
 
-Phase #8's `define-config` becomes the plugin-facing form `config`:
+Phase #8's `define-config` becomes the plugin-facing procedure `config`:
 
 ```scheme
-(config provider-api-key :sources (env "FOOBAR_API_KEY"))
+(define provider-api-key
+  (config 'provider-api-key #:sources (env "FOOBAR_API_KEY")))
 ```
 
 - The host resolves the source at load time and passes the value in. A plugin
@@ -413,6 +437,23 @@ Phase #8's `define-config` becomes the plugin-facing form `config`:
   empty string. The manifest lists the config names a plugin needs, so the gate
   fails a missing value before the runtime starts.
 
+Decided 2026-10-30 (hen-82r.6): `config` is a procedure, not syntax —
+interpreted modules cannot export syntax (open question 1) — and the keyword
+is spelled `#:sources`, CHICKEN keyword syntax; `env` is a constructor
+returning a source descriptor. The host pre-pops every resolved value
+before any module load with `(begin (hen:config/set! "var" "value") #t)`
+(`src/environment/env.zig`, one `ConfigValue { source_var, value }` per
+resolved declaration; the `begin ... #t` wrap exists because
+`hen:config/set!` itself returns the whole new config table). Resolution is
+literal-wins with env fallback during manifest preparation
+(`src/generations/load.zig`, `prepare`): a declaration with neither a
+literal nor an env source fails `ConfigUnresolved` before any runtime
+starts, as does a declaration with no env value for its source. A
+declaration carrying only a literal publishes nothing beyond an ordinary
+module value; a source with no host value still raises at `config`-call
+time inside module load (`scheme/env.scm`, `resolve-config`), so a
+generation loaded without the host's pre-population fails loudly.
+
 Decided 2026-10-25 (open question 6): provider configuration is declared in a
 generation. A plugin declares the endpoint(s), the compatible API to use, the
 key source, and the model set; the efficiently implemented Zig provider takes
@@ -422,32 +463,54 @@ defining one.
 
 ## 12. Loading a generation
 
-A generation directory:
+A generation root:
 
 ```text
+generations/
+  ledger.sexp      append-only event log, one five-field tuple per line:
+                   (generation ...) (parent ...) (hash ...) (status
+                   candidate|promoted|failed|discarded) (evidence ...)
+  active           the active generation id; repointing writes .active.tmp
+                   and renames — that rename is rollback
 generations/<id>/
-  manifest.sexp   api version, modules (name, entry file, in load order),
-                  config names, capabilities, caps, resolved unit pins,
-                  parent
-  sources/        Scheme sources, in load order — written directly or
-                  materialized from published plugins (below)
-  tests/          tool tests, run by the gate
-  lessons.sexp    optional; deferred (open question 9) — a separate design
-                  document owns the concept, nothing reads it yet
+  manifest.sexp    api version, modules (name, entry file, in load order),
+                   config decls (name, env source, secret flag, literal),
+                   capabilities, caps, provider block, parent, content hash
+  sources/         Scheme sources, in load order
+  tests/           tool tests, run by the gate
+  registry.sexp    written when the gate passes: one parenthesized
+                   five-field record per line — the parent diff's baseline
+                   (section 13)
+  lessons.sexp     deferred (open question 9) — a separate design document
+                   owns the concept; nothing writes it yet
 ```
 
-Load order, all on the runtime thread:
+Preparation (`src/generations/load.zig`, `prepare`) happens before any
+runtime starts: read and validate the manifest, check its api against
+`environment.bridge_api_version` (`"1"`, `src/environment/env.zig`), and
+check each module name — charset `[A-Za-z0-9_.-]`, non-empty, `hen-plugin`
+reserved; the 64-character limit is the published-tool-name rule and lives
+in the registry, not the manifest check. The config values then resolve
+(section 11). The runtime then runs, all on the runtime thread:
 
-1. read the manifest, check the api version
-2. resolve the config values
-3. wrap each source in its module (section 3) and load them in order
-4. build the registry and the documentation store from the registration calls
-5. run `hen:tools/list` and `hen:docs/list`
-6. run the gate, including the documentation lint
+1. `Env.init`/`Env.initGeneration` loads the host material `scheme/env.scm`
+   first — the registry, never a generation source
+2. eval `(begin (hen:config/set! ...) #t)` per resolved value
+3. eval the module wrapper per manifest entry, in manifest order, entry
+   paths absolute (section 3); the registry and the documentation store
+   build from the registration calls, and the gate runs (section 13)
+
+Decided 2026-10-30 (hen-82r.6): `Env.initGeneration` splits into `Env.init`
+(host material only) plus `Env.loadGeneration` (the config values, then the
+module wrappers in order), so the gate can run `loadGeneration` against a
+bare checkpointed runtime (`src/environment/env.zig`). Host-material loading
+is cwd-relative: `Env.init` loads `scheme/env.scm` and the vendored
+chicken-core import stubs relative to the working directory, so hen needs a
+repo-root-like cwd even though generation module paths are absolute.
 
 Interpreted sources load through the module wrapper of section 3: the host
-evals `(module <name> (import hen-plugin) (include "<path>"))` per manifest
-entry, in order. Compiled units come from `csc -o` and load with
+evals one wrapper per manifest entry, in order. Compiled units come from
+`csc -o` and load with
 `repository-path` plus `require`, which loads `<id>.so` or `<id>.scm` from the
 repository path (`manual/Module (chicken load):57-70`); `provided?` makes a
 compiled load idempotent. A plugin that links its own foreign C code loads
@@ -526,14 +589,33 @@ a smoke eval, the generation's tool tests, the registry diff against the parent,
 resource caps. Run it twice when a result is close (Phase #8). A model critic may
 attach evidence; it never decides.
 
-The documentation lint is part of the gate: every tool and skill has a summary
-and a description, every `links` and `tools` name resolves, and every
-registered item has a module. Budget checks are dropped for now (open
-question 13).
+Decided 2026-10-30 (hen-82r.6): as shipped (`src/generations/gate.zig`,
+`run`) the order is exact. `hen:registrations/checkpoint!` runs before the
+candidate's modules load, then: module load, the `hen:tools/list` parse
+(five-field records), the documentation lint, the smoke eval `(+ 1 2)`
+returning `3`, the tool tests in sorted order, the registry diff, and
+`hen:registrations/undo!` always — the checkpoint/undo pair is one rollback
+contract, because a gate that does not checkpoint before load leaves a
+mid-load failure's registrations in the registry. Resource caps are dropped
+(open question 13): "run it twice when a result is close" has no closeness
+metric in a deterministic pass/fail gate — it targets future scored, noisy
+evaluation. The manifest's capabilities line is reported, not enforced
+(open question 5). The report is a deterministic one-line gate sexp appended
+to `ledger.sexp` as the candidate's evidence (section 12). The diff excludes
+`hen-`-prefixed structural names and is evidence only — it never decides
+pass or fail. After the gate the live registry reverts to the bare
+pre-candidate state, not to the active generation: re-registering a name
+and then undoing would delete the active generation's entries.
+
+The documentation lint is part of the gate: today's checks are that every
+tool is module-prefixed with a manifest module name and carries a non-empty
+summary and a description; skills lint later (no skills exist). Budget
+checks are dropped for now (open question 13).
 
 The registry diff reports added, removed, and changed tools, tools and skills
-whose records changed, and it excludes the meta tools. A doc-only change is a
-cheap promotion: the lint still runs, and the diff says the code did not move.
+whose records changed, and it excludes the `hen-` structural names. A
+doc-only change is a cheap promotion: the lint still runs, and the diff says
+the code did not move.
 
 ## 14. Promotion, and where isolation comes from
 
@@ -594,6 +676,19 @@ The shape form left the api surface with the JSON argument removal
 (2026-10-25, hen-82r.8) and returned to it with the dispatch preflight
 (2026-10-25, section 8): a change to what a shape can express changes dispatch
 behavior, and that is a bump.
+
+Decided 2026-10-30 (hen-82r.6): the names above are the model-facing stable
+names. `hen:config/set!`, `hen:registrations/checkpoint!`,
+`hen:registrations/undo!`, and `hen:assert!` are bridge-versioned host
+material of `scheme/env.scm`, not model-facing: they configure the runtime
+and execute the gate, and a change to any of them requires a bump the same
+way — generation loading already compares the manifest api against
+`environment.bridge_api_version` (`"1"`). `hen:tools/load` is unchanged and
+stays Phase #9. The `hen:assert!` contract for test authors:
+`(hen:assert! value expected)` compares the written forms of both
+arguments, returns `#t` on a match, and raises on a mismatch; the
+written-form comparison equates `"42"` and `42`, so the expected value may
+be written as either.
 
 ## 16. Non-goals
 

@@ -77,7 +77,6 @@ test "that 'x-opencode-session' get sent to endpoint" {
         }
         try std.testing.expect(found);
     }
-
 }
 
 test "opencode provider defaults to the zen endpoints" {

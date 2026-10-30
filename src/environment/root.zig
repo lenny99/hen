@@ -202,9 +202,22 @@ pub const Environment = struct {
     }
 };
 
-pub const Env = @import("env.zig").Env;
-pub const ToolDesc = @import("env.zig").ToolDesc;
+const env = @import("env.zig");
+
+pub const Env = env.Env;
+pub const ToolDesc = env.ToolDesc;
+pub const ModuleEntry = env.ModuleEntry;
+pub const ConfigValue = env.ConfigValue;
+pub const ModuleName = env.ModuleName;
+pub const ModulePath = env.ModulePath;
+pub const ConfigSourceVar = env.ConfigSourceVar;
+pub const ConfigLiteral = env.ConfigLiteral;
+pub const bridge_api_version = env.bridge_api_version;
+pub const Datum = env.Datum;
+pub const parseDatum = env.parseDatum;
+pub const freeDatum = env.freeDatum;
+pub const writeSchemeString = env.writeSchemeString;
 
 test {
-    _ = @import("env.zig");
+    _ = env;
 }

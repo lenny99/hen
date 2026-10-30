@@ -1,0 +1,1 @@
+(manifest (api "1") (modules (module "alpha" "sources/alpha.scm")) (config (decl "alpha-pin" (env "GENERATIONS_TEST_FIXTURE_FOO") #f ())) (capabilities) (caps) (hash "22b3cdf1e77bfc68c83001272bb275bd28a31d39175fbd0ed75a2153bece2378"))

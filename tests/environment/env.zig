@@ -463,3 +463,237 @@ test "asEnvironment ignores the tool name" {
     const bridge = env.asEnvironment();
     try std.testing.expectEqualStrings("3", try bridge.call(std.testing.io, a, "not-a-wire-name", "(+ 1 2)"));
 }
+const mod_fixture_path = "tests/environment/testdata/mod.scm";
+
+const wall_import = "(import scheme (chicken base) (chicken condition) (chicken port) hen-plugin)";
+
+fn absoluteModFixture(a: std.mem.Allocator) ![]const u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, mod_fixture_path, a);
+}
+
+fn wrapperSource(a: std.mem.Allocator, module_name: []const u8) ![]const u8 {
+    const path = try absoluteModFixture(a);
+    return std.fmt.allocPrint(
+        a,
+        "(module {s} * {s} (register-module! '{s}) (include \"{s}\") (and #t))",
+        .{ module_name, wall_import, module_name, path },
+    );
+}
+
+fn duplicateWrapperSource(a: std.mem.Allocator, module_name: []const u8) ![]const u8 {
+    const path = try absoluteModFixture(a);
+    return std.fmt.allocPrint(
+        a,
+        "(module {s} * {s} (register-module! '{s}) (include \"{s}\") (include \"{s}\") (and #t))",
+        .{ module_name, wall_import, module_name, path, path },
+    );
+}
+
+fn setWallConfig(a: std.mem.Allocator, interpreter: Interpreter) !void {
+    const set_config = try std.fmt.allocPrint(a, "(hen:config/set! \"HEN_WALL_CFG\" \"wall-value\")", .{});
+    var buffer: [64]u8 = undefined;
+    _ = try interpreter.eval(a, set_config, &buffer);
+}
+
+fn sameListing(left: []const environment.ToolDesc, right: []const environment.ToolDesc) !void {
+    try std.testing.expectEqual(left.len, right.len);
+    for (left, right) |before, after| {
+        try std.testing.expectEqualStrings(before.name, after.name);
+    }
+}
+
+test "a wrapped module loads behind the module wall" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const interpreter = try registry();
+    try setWallConfig(a, interpreter);
+    const wrapper = try wrapperSource(a, "hen-wall");
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("#t", try interpreter.eval(a, wrapper, &output));
+
+    var listing: [4096]u8 = undefined;
+    const written = try interpreter.eval(a, "(hen:tools/list)", &listing);
+    try std.testing.expect(std.mem.indexOf(u8, written, "hen-wall-listen") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Shows what the model asked.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Whenever the wall tool answers one question.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "hen-wall-listen-again") != null);
+}
+
+test "the module wall keeps plugin internals unreachable from the interaction env" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const wrapper = try wrapperSource(a, "hen-wall");
+    var output: [64]u8 = undefined;
+    _ = try env.interpreter.eval(a, wrapper, &output);
+
+    const secret = try env.call(a, "*mod-secret*");
+    try std.testing.expect(std.mem.startsWith(u8, secret, "Error: "));
+    try std.testing.expect(std.mem.indexOf(u8, secret, "unbound variable") != null);
+
+    const cfg_binding = try env.call(a, "*mod-cfg*");
+    try std.testing.expect(std.mem.startsWith(u8, cfg_binding, "Error: "));
+
+    const route = try env.call(a, "(hen:tools/call! 'hen-wall-listen '((text . \"ask\")))");
+    try std.testing.expectEqualStrings("wall-value:ask", route);
+}
+
+test "hen:tools/list entries carry the five-field record shape" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const wrapper = try wrapperSource(a, "hen-wall");
+    var output: [64]u8 = undefined;
+    _ = try env.interpreter.eval(a, wrapper, &output);
+
+    const descs = try env.tools(a);
+    var found = false;
+    for (descs) |desc| {
+        if (std.mem.eql(u8, desc.name, "hen-wall-listen")) {
+            found = true;
+            try std.testing.expectEqualStrings("Shows what the model asked.", desc.summary);
+            try std.testing.expectEqualStrings("Whenever the wall tool answers one question.", desc.when);
+            try std.testing.expectEqualStrings("Writes the ask back with its host-resolved config value.", desc.description);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "registering the same short name twice in one module fails and the registry stays clean" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const pre_listing = try env.tools(a);
+
+    var output: [1024]u8 = undefined;
+    _ = try env.interpreter.eval(a, "(hen:registrations/checkpoint!)", &output);
+    const wrapper = try duplicateWrapperSource(a, "hen-dup-again");
+    try std.testing.expectError(error.SchemeError, env.interpreter.eval(a, wrapper, &output));
+
+    var message_buffer: [512]u8 = undefined;
+    _ = env.interpreter.lastError(&message_buffer) catch |err| return err;
+    try std.testing.expect(std.mem.indexOf(u8, &message_buffer, "twice in module") != null);
+    try std.testing.expect(std.mem.indexOf(u8, &message_buffer, "hen-dup-again") != null);
+
+    _ = try env.interpreter.eval(a, "(hen:registrations/undo!)", &output);
+
+    const post_listing = try env.tools(a);
+    try sameListing(pre_listing, post_listing);
+}
+
+test "checkpoint and undo restore the registry to the mark" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const pre_listing = try env.tools(a);
+
+    var output: [64]u8 = undefined;
+    _ = try env.interpreter.eval(a, "(hen:registrations/checkpoint!)", &output);
+
+    const wrapper = try wrapperSource(a, "hen-undo");
+    try std.testing.expectEqualStrings("#t", try env.interpreter.eval(a, wrapper, &output));
+    const mid_listing = try env.tools(a);
+    try std.testing.expectEqual(pre_listing.len + 2, mid_listing.len);
+
+    _ = try env.interpreter.eval(a, "(hen:registrations/undo!)", &output);
+
+    const post_listing = try env.tools(a);
+    try sameListing(pre_listing, post_listing);
+}
+
+test "a failed module load rolls back to the checkpointed registry" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const pre_listing = try env.tools(a);
+
+    var output: [256]u8 = undefined;
+    _ = try env.interpreter.eval(a, "(hen:registrations/checkpoint!)", &output);
+
+    const wrapper = try duplicateWrapperSource(a, "hen-failedload");
+    try std.testing.expectError(error.SchemeError, env.interpreter.eval(a, wrapper, &output));
+    _ = try env.interpreter.eval(a, "(hen:registrations/undo!)", &output);
+
+    const post_listing = try env.tools(a);
+    try sameListing(pre_listing, post_listing);
+}
+
+test "config resolves the host-populated value through the wall" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    try setWallConfig(a, env.interpreter);
+    const wrapper = try wrapperSource(a, "hen-cfgwall");
+    var output: [64]u8 = undefined;
+    _ = try env.interpreter.eval(a, wrapper, &output);
+
+    const observation = try env.call(a, "(hen:tools/call! 'hen-cfgwall-listen '((text . \"ask\")))");
+    try std.testing.expectEqualStrings("wall-value:ask", observation);
+}
+
+test "a missing config value fails the module load" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    var output: [256]u8 = undefined;
+    const wrapper = try wrapperSource(a, "hen-noconfig");
+    try std.testing.expectError(error.SchemeError, env.interpreter.eval(a, wrapper, &output));
+
+    var message_buffer: [512]u8 = undefined;
+    _ = env.interpreter.lastError(&message_buffer) catch |err| return err;
+    try std.testing.expect(std.mem.indexOf(u8, &message_buffer, "missing configuration value") != null);
+    const post_listing = try env.tools(a);
+    try std.testing.expectEqual(@as(usize, 4), post_listing.len);
+}
+
+test "hen:assert! passes on equal written forms and raises on mismatches" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, registry_and_fixture);
+    var output: [16]u8 = undefined;
+
+    try std.testing.expectEqualStrings("#t", try env.interpreter.eval(a, "(hen:assert! 42 42)", &output));
+    try std.testing.expectEqualStrings("#t", try env.interpreter.eval(a, "(hen:assert! \"same\" \"same\")", &output));
+    try std.testing.expectError(error.SchemeError, env.interpreter.eval(a, "(hen:assert! 42 0)", &output));
+    try std.testing.expectError(error.SchemeError, env.interpreter.eval(a, "(hen:assert! \"text\" 42)", &output));
+}
+
+test "reloading the registry resets registration state" {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env = try environment.Env.init(a, &.{registry_path});
+    var output: [2048]u8 = undefined;
+
+    _ = try env.interpreter.eval(a, "(register-tool! 'hen-preload #:summary \"s\" #:handler (lambda (args) \"\"))", &output);
+    const with_tool = try env.tools(a);
+    try std.testing.expectEqual(@as(usize, 1), with_tool.len);
+
+    try env.interpreter.load(a, registry_path);
+    const after_reload = try env.tools(a);
+    try std.testing.expectEqual(@as(usize, 0), after_reload.len);
+}
