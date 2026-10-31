@@ -6,9 +6,7 @@
 //! operation, so there is intentionally no `deinit` method.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("chicken/chicken.h");
-});
+const c = @import("chicken");
 
 const output_too_small_message = "Error: not enough room for result string";
 
@@ -94,7 +92,7 @@ pub const Interpreter = struct {
         if (std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidCString;
         _ = try toCInt(source.len);
 
-        const source_z = try allocator.dupeZ(u8, source);
+        const source_z = try allocator.dupeSentinel(u8, source, 0);
         defer allocator.free(source_z);
 
         const output_len = try toCInt(output.len);
@@ -111,7 +109,7 @@ pub const Interpreter = struct {
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidCString;
         _ = try toCInt(path.len);
 
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         if (c.CHICKEN_load(path_z.ptr) != 0) return;

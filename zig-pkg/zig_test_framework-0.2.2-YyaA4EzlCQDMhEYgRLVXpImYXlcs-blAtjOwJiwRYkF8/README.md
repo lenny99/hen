@@ -1,0 +1,999 @@
+# Zig Test Framework
+
+A modern, feature-rich testing framework for Zig inspired by Jest, Vitest, and Bun's test runner.
+
+## Features
+
+- **Test Discovery** - Automatic discovery of `*.test.zig` files
+- **Code Coverage** - Line, branch, and function coverage with HTML reports (via kcov/grindcov)
+- **Async Test Support** - Full async test execution with concurrent and sequential modes
+- **Timeout Handling** - Configurable timeouts at test, suite, and global levels with extension support
+- **Retries & Repeats** - Re-run failures, stress-run selected tests, and report flaky outcomes
+- **Reproducible Randomization** - Shuffle suites and tests with replayable seeds
+- **Familiar API** - Describe/it syntax similar to Jest and Vitest
+- **Rich Assertions** - Comprehensive assertion library with `.expect()` and matchers
+- **Error Assertions** - `toThrow()` and `toThrowError()` for testing error handling
+- **Lifecycle Hooks** - beforeEach, afterEach, beforeAll, afterAll support (with async support and nested scoping)
+- **Multiple Reporters** - Spec, Dot, JSON, TAP, and JUnit reporters built-in
+- **Mocking & Spying** - Full Jest-compatible mocking API with call tracking, return values, and spies
+- **Snapshot Testing** - Compare outputs against saved snapshots with multiple formats (JSON, pretty text, compact)
+- **Time Mocking** - Control time in tests with `setSystemTime()` and Jest-compatible time APIs
+- **Advanced Matchers** - Floating-point comparison, array/struct matchers, and more
+- **CLI Support** - Full command-line interface with filtering and options
+- **Nested Suites** - Support for nested describe blocks
+- **Test Filtering** - Skip tests with `.skip()` or focus with `.only()`
+- **Colorized Output** - Beautiful, readable test output with colors
+- **Watch Mode** - Automatically re-run tests on file changes
+- **Memory Profiling** - Track memory usage and detect leaks
+- **Parallel Execution** - Run tests in parallel for faster execution
+- **Configuration Files** - Strict JSON config files with CLI overrides
+
+## Installation
+
+### As a Dependency
+
+Add to your `build.zig.zon`:
+
+```zig
+.{
+    .name = "my-project",
+    .version = "0.1.0", // Your project's version
+    .dependencies = .{
+        .@"zig-test-framework" = .{
+            .url = "https://github.com/zig-utils/zig-test-framework/archive/refs/tags/vX.Y.Z.tar.gz",
+            // Replace X.Y.Z and the hash with the release you use
+        },
+    },
+}
+```
+
+### Quick Start
+
+1. Clone this repository
+2. Run `zig build` to build the framework
+3. Run `zig build test` to run the framework's self-tests
+4. Run `zig build examples` to run the example tests
+
+## Usage
+
+There are two ways to use the Zig Test Framework:
+
+1. **Test Discovery Mode** - Automatically discover and run `*.test.zig` files (recommended)
+2. **Programmatic Mode** - Manually register tests using `describe()` and `it()`
+
+### Test Discovery Mode (Recommended)
+
+The easiest way to use the framework is with automatic test discovery:
+
+1. Create test files with the `.test.zig` extension:
+
+```zig
+// tests/math.test.zig
+const std = @import("std");
+
+test "addition works" {
+    const result = 2 + 2;
+    try std.testing.expectEqual(@as(i32, 4), result);
+}
+
+test "subtraction works" {
+    const result = 10 - 5;
+    try std.testing.expectEqual(@as(i32, 5), result);
+}
+```
+
+2. Run all tests:
+
+```bash
+zig-test --test-dir tests
+```
+
+This will automatically discover and run all `*.test.zig` files in the `tests` directory.
+
+**CLI Options for Test Discovery:**
+
+- `--test-dir <dir>` - Directory to search for tests (default: current directory)
+- `--pattern <pattern>` - File pattern to match (default: `*.test.zig`)
+- `--no-recursive` - Disable recursive directory search
+- `--bail` - Stop on first failure
+- `--filter <text>` / `--grep <text>` - Run only Zig tests whose names contain the text
+- `--reporter <name>` - Use spec, dot, JSON, TAP, or JUnit output
+- `--junit-output <file>` - Set the JUnit XML path
+- `--timeout <ms>` - Mark files that exceed the global time budget as failed
+- `--retry <N>` - Retry a failed test or discovered test file up to N times
+- `--repeat <N>` - Require N successful repetitions of every selected test
+- `--fail-on-flaky` - Return a failing exit status when a retry recovers a failure
+- `--shuffle` - Randomize suites, tests, or discovered files with a generated seed
+- `--seed <N>` - Replay a randomized order; supplying a seed implies `--shuffle`
+- `--shard-index <N>` - Run one one-based file shard
+- `--shard-count <N>` - Set the total number of file shards
+- `--no-color` - Disable color in child Zig test processes
+- `--ui` - Serve the live test UI (configure it with `--ui-host` and `--ui-port`)
+- `--verbose` - Show detailed output
+
+Discovery and programmatic execution share the same test-plan, lifecycle,
+result, and reporter model. Discovery still rejects options it cannot honor
+instead of silently ignoring them: quiet output, parallel jobs, snapshot
+updates, and memory profiling remain programmatic-only. See
+[the execution pipeline architecture](docs/execution-pipeline.md) for extension
+points, timeout semantics, and migration guidance.
+
+**Examples:**
+
+```bash
+# Run all tests in tests/ directory
+zig-test --test-dir tests
+
+# Run tests with custom pattern
+zig-test --test-dir src --pattern "*.spec.zig"
+
+# Run tests without recursion
+zig-test --test-dir tests --no-recursive
+
+# Stop on first failure
+zig-test --test-dir tests --bail
+
+# Watch tests in the live web UI
+zig-test --test-dir tests --ui --watch
+
+# Retry failures twice and fail CI if any test is flaky
+zig-test --test-dir tests --retry 2 --fail-on-flaky
+
+# Stress-run matching tests 100 times
+zig-test --test-dir tests --filter parser --repeat 100
+
+# Expose order dependencies, then replay the exact order with the printed seed
+zig-test --test-dir tests --shuffle
+zig-test --test-dir tests --seed 8675309
+
+# Run the second of four deterministic file shards
+zig-test --test-dir tests --shard-index 2 --shard-count 4
+```
+
+#### Distributed CI sharding
+
+Sharding is opt-in and file-based. Both options are required, shard indices are
+one-based, and `1 <= shard-index <= shard-count`. Test files are assigned from
+their normalized relative paths with a fixed FNV-1a 64 hash, so the same paths
+and shard count always produce the same assignment on every platform. Each file
+belongs to exactly one shard; a valid shard with no matching files succeeds.
+
+Discovery and file-pattern selection happen before sharding. `--filter` is then
+forwarded to `zig test` for every file in the selected shard. Coverage and bail
+behavior apply only to that shard. The summary prints the shard, selected file
+count, and total discovered file count.
+
+```yaml
+jobs:
+  test:
+    strategy:
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - run: zig build
+      - run: zig build run -- --test-dir tests --shard-index ${{ matrix.shard }} --shard-count 4
+```
+
+### Configuration files
+
+`--config <file>` loads a strict JSON configuration before test discovery.
+Unknown keys, duplicate keys, wrong value types, unsupported extensions, and
+invalid runtime values fail with a configuration error. TOML and YAML are not
+currently supported. Explicit CLI options are parsed after the file and take
+precedence over configured values.
+
+```json
+{
+  "test": {
+    "test_dir": "tests",
+    "pattern": "*.test.zig",
+    "recursive": true,
+    "filter": "database",
+    "retries": 2,
+    "repeat": 10,
+    "fail_on_flaky": true,
+    "shuffle": true,
+    "seed": 8675309
+  },
+  "sharding": {
+    "index": 1,
+    "count": 4
+  },
+  "coverage": {
+    "enabled": false,
+    "output_dir": "coverage"
+  }
+}
+```
+
+The accepted top-level sections are `test`, `sharding`, `parallel`, `reporter`,
+`snapshot`, `watch`, `memory`, `ui`, and `coverage`. Options retain the same execution-mode
+limitations as their CLI equivalents; unsupported combinations fail explicitly.
+
+See [Retries, repeats, and flaky tests](docs/retries-and-repeats.md) for attempt
+semantics, exit codes, reporter output, and programmatic configuration.
+See [Randomized test order](docs/randomized-order.md) for replay and ordering
+guarantees.
+
+### Parallel execution semantics
+
+Programmatic runners can enable bounded execution with `RunnerOptions.parallel`
+and set `n_jobs`. A configured value is the exact maximum number of active test
+workers; omitting it uses the host's logical CPU count, with a one-worker
+fallback when detection is unavailable.
+
+Suites and nested suites are visited in the selected order: declaration order
+by default, or deterministic seed order when randomization is enabled. `beforeAll` and
+`afterAll` run once on the coordinating thread around that suite and its nested
+suites. Direct tests within a suite may overlap. Their inherited `beforeEach`
+and `afterEach` hooks run on the same worker as the test, so per-test hook order
+is preserved but hooks from different tests may overlap. Hook state and the
+allocator passed to tests must therefore be thread-safe.
+
+Reporter callbacks never run concurrently: test results are emitted in
+the selected order after each parallel batch, making output and final totals
+deterministic. A parallel batch is already scheduled as a unit, so `bail` cannot
+cancel tests that have started.
+
+### Programmatic Mode
+
+For more control, you can manually register tests:
+
+```zig
+const std = @import("std");
+const ztf = @import("zig-test-framework");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer * = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Define a test suite
+    try ztf.describe(allocator, "Math operations", struct {
+        fn testSuite(alloc: std.mem.Allocator) !void {
+            try ztf.it(alloc, "should add two numbers", testAddition);
+            try ztf.it(alloc, "should subtract two numbers", testSubtraction);
+        }
+
+        fn testAddition(alloc: std.mem.Allocator) !void {
+            const result = 2 + 2;
+            try ztf.expect(alloc, result).toBe(4);
+        }
+
+        fn testSubtraction(alloc: std.mem.Allocator) !void {
+            const result = 10 - 5;
+            try ztf.expect(alloc, result).toBe(5);
+        }
+    }.testSuite);
+
+    // Run all tests
+    const registry = ztf.getRegistry(allocator);
+    const success = try ztf.runTests(allocator, registry);
+
+    // Clean up the registry
+    ztf.cleanupRegistry();
+
+    if (!success) {
+        std.process.exit(1);
+    }
+}
+```
+
+### Assertions
+
+```zig
+// Basic equality
+try expect(alloc, 5).toBe(5);
+try expect(alloc, true).toBeTruthy();
+try expect(alloc, false).toBeFalsy();
+
+// Negation
+try expect(alloc, 5).not().toBe(10);
+
+// Comparisons
+try expect(alloc, 10).toBeGreaterThan(5);
+try expect(alloc, 10).toBeGreaterThanOrEqual(10);
+try expect(alloc, 5).toBeLessThan(10);
+try expect(alloc, 5).toBeLessThanOrEqual(5);
+
+// Strings
+try expect(alloc, "hello").toBe("hello");
+try expect(alloc, "hello world").toContain("world");
+try expect(alloc, "hello").toStartWith("hel");
+try expect(alloc, "hello").toEndWith("lo");
+try expect(alloc, "hello").toHaveLength(5);
+
+// Optionals
+const value: ?i32 = null;
+try expect(alloc, value).toBeNull();
+
+const defined: ?i32 = 42;
+try expect(alloc, defined).toBeDefined();
+
+// Arrays/Slices
+const numbers = [*]i32{1, 2, 3, 4, 5};
+const matcher = expectArray(alloc, &numbers);
+try matcher.toHaveLength(5);
+try matcher.toContain(3);
+try matcher.toContainAll(&[*]i32{1, 3, 5});
+
+// Error assertions
+const FailingFn = struct {
+    fn call() !void {
+        return error.TestError;
+    }
+};
+try expect(alloc, FailingFn.call).toThrow();
+try expect(alloc, FailingFn.call).toThrowError(error.TestError);
+```
+
+### Advanced Matchers
+
+```zig
+// Floating-point comparison
+try ztf.toBeCloseTo(0.1 + 0.2, 0.3, 10);
+
+// NaN and Infinity
+try ztf.toBeNaN(std.math.nan(f64));
+try ztf.toBeInfinite(std.math.inf(f64));
+
+// Struct matching
+const User = struct {
+    name: []const u8,
+    age: u32,
+};
+
+const user = User{ .name = "Alice", .age = 30 };
+const matcher = ztf.expectStruct(alloc, user);
+try matcher.toHaveField("name", "Alice");
+try matcher.toHaveField("age", @as(u32, 30));
+```
+
+### Test Hooks
+
+```zig
+try ztf.describe(allocator, "Database tests", struct {
+    var db*connection: ?*Database = null;
+
+    fn testSuite(alloc: std.mem.Allocator) !void {
+        // Runs once before all tests
+        try ztf.beforeAll(alloc, setupDatabase);
+
+        // Runs before each test
+        try ztf.beforeEach(alloc, openConnection);
+
+        // Runs after each test
+        try ztf.afterEach(alloc, closeConnection);
+
+        // Runs once after all tests
+        try ztf.afterAll(alloc, teardownDatabase);
+
+        try ztf.it(alloc, "should query data", testQuery);
+        try ztf.it(alloc, "should insert data", testInsert);
+    }
+
+    fn setupDatabase(alloc: std.mem.Allocator) !void {
+        // Initialize database
+    }
+
+    fn teardownDatabase(alloc: std.mem.Allocator) !void {
+        // Cleanup database
+    }
+
+    fn openConnection(alloc: std.mem.Allocator) !void {
+        // Open DB connection
+    }
+
+    fn closeConnection(alloc: std.mem.Allocator) !void {
+        // Close DB connection
+    }
+
+    fn testQuery(alloc: std.mem.Allocator) !void {
+        // Test implementation
+    }
+
+    fn testInsert(alloc: std.mem.Allocator) !void {
+        // Test implementation
+    }
+}.testSuite);
+```
+
+### Memory Management
+
+**Important**: Always call `cleanupRegistry()` after running tests to prevent memory leaks:
+
+```zig
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer * = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Define your test suites...
+    try ztf.describe(allocator, "My tests", ...);
+
+    // Run tests
+    const registry = ztf.getRegistry(allocator);
+    const success = try ztf.runTests(allocator, registry);
+
+    // Clean up - IMPORTANT!
+    ztf.cleanupRegistry();
+
+    if (!success) {
+        std.process.exit(1);
+    }
+}
+```
+
+The `cleanupRegistry()` function frees all test suites, test cases, and associated resources. Without it, you'll see memory leaks when using `GeneralPurposeAllocator` in debug mode.
+
+### Nested Describe Blocks
+
+```zig
+try ztf.describe(allocator, "User Service", struct {
+    fn testSuite(alloc: std.mem.Allocator) !void {
+        try ztf.describe(alloc, "Authentication", struct {
+            fn nestedSuite(nested*alloc: std.mem.Allocator) !void {
+                try ztf.it(nested*alloc, "should login with valid credentials", testValidLogin);
+                try ztf.it(nested*alloc, "should reject invalid credentials", testInvalidLogin);
+            }
+
+            fn testValidLogin(nested*alloc: std.mem.Allocator) !void {
+                // Test implementation
+            }
+
+            fn testInvalidLogin(nested*alloc: std.mem.Allocator) !void {
+                // Test implementation
+            }
+        }.nestedSuite);
+    }
+}.testSuite);
+```
+
+### Mocking and Spying
+
+Full Jest-compatible mocking API:
+
+```zig
+// Create a mock
+var mock*fn = ztf.createMock(alloc, i32);
+defer mock*fn.deinit();
+
+// Record calls and assert
+try mock*fn.recordCall("arg1");
+try mock*fn.toHaveBeenCalled();
+try mock*fn.toHaveBeenCalledTimes(1);
+try mock*fn.toHaveBeenCalledWith("arg1");
+
+// Mock return values
+
+* = try mock*fn.mockReturnValue(42);
+* = try mock*fn.mockReturnValueOnce(100);
+
+const value = mock*fn.getReturnValue(); // Returns 100 first time, then 42
+
+// Spy on existing functions
+const original: i32 = 99;
+var spy = ztf.createSpy(alloc, i32, original);
+defer spy.deinit();
+
+try spy.call("test");
+try spy.toHaveBeenCalled();
+const restored = spy.mockRestore();
+```
+
+See [docs/mocks.md](docs/mocks.md) for complete mocking documentation.
+
+### Snapshot Testing
+
+Capture and compare test outputs:
+
+```zig
+// Create a snapshot
+var snap = ztf.createSnapshot(alloc, "user*test", .{
+    .update = true,
+    .format = .json,
+});
+
+// Match against snapshot
+const user = User{ .name = "Alice", .age = 30 };
+try snap.match(user);
+
+// Named snapshots
+try snap.matchNamed("initial*state", initial);
+try snap.matchNamed("after*update", updated);
+
+// String snapshots
+try snap.matchString("Expected output");
+```
+
+Snapshots are stored in `.snapshots/` directory. Run tests with `update: true` to create/update snapshots.
+
+See [docs/snapshots.md](docs/snapshots.md) for complete snapshot documentation.
+
+### Time Mocking
+
+Control time in your tests:
+
+```zig
+// Set specific time (Jan 1, 2020)
+ztf.setSystemTime(alloc, 1577836800000);
+
+const year = ztf.DateHelper.getYear(ztf.time.now(alloc));
+try ztf.expect(alloc, year).toBe(@as(u16, 2020));
+
+// Advance time
+ztf.advanceTimersByTime(alloc, 60000); // Advance 1 minute
+
+// Jest-compatible API
+ztf.jest.useFakeTimers(alloc);
+ztf.jest.setSystemTime(alloc, 1577836800000);
+const current = ztf.jest.now(alloc);
+ztf.jest.advanceTimersByTime(alloc, 5000);
+ztf.jest.useRealTimers(alloc);
+
+// Reset to real time
+ztf.setSystemTime(alloc, null);
+```
+
+See [docs/dates-and-times.md](docs/dates-and-times.md) for complete time mocking documentation.
+
+### Test Filtering
+
+```zig
+// Skip a test
+try ztf.itSkip(alloc, "should skip this test", testSkipped);
+
+// Skip an entire suite
+try ztf.describeSkip(allocator, "Skipped suite", struct {
+    // All tests in this suite will be skipped
+}.testSuite);
+
+// Run only specific tests
+try ztf.itOnly(alloc, "should run only this test", testOnly);
+
+// Run only specific suites
+try ztf.describeOnly(allocator, "Only this suite", struct {
+    // Only tests in this suite will run
+}.testSuite);
+```
+
+### Async Tests
+
+Run tests asynchronously with full concurrency support:
+
+```zig
+// Basic async test
+try ztf.itAsync(allocator, "async operation", struct {
+    fn run(alloc: std.mem.Allocator) !void {
+
+        * = alloc;
+
+        std.Thread.sleep(100 * std.time.ns*per*ms);
+        // Test async operations
+    }
+}.run);
+
+// Async test with custom timeout
+try ztf.itAsyncTimeout(allocator, "slow async operation", asyncTestFn, 10000);
+
+// Skip/only for async tests
+try ztf.itAsyncSkip(allocator, "skipped async test", testFn);
+try ztf.itAsyncOnly(allocator, "focused async test", testFn);
+
+// Using AsyncTestExecutor for advanced control
+var executor = ztf.AsyncTestExecutor.init(allocator, .{
+    .concurrent = true,
+    .max*concurrent = 5,
+    .default*timeout*ms = 5000,
+});
+defer executor.deinit();
+
+try executor.registerTest("test1", testFn1);
+try executor.registerTest("test2", testFn2);
+
+const results = try executor.executeAll();
+defer allocator.free(results);
+```
+
+### Timeout Handling
+
+Configure timeouts at multiple levels:
+
+```zig
+// Per-test timeout (1 second)
+try ztf.itTimeout(allocator, "timed test", testFn, 1000);
+
+// Per-suite timeout (5 seconds for all tests in suite)
+try ztf.describeTimeout(allocator, "Timed Suite", 5000, struct {
+    fn suite(alloc: std.mem.Allocator) !void {
+        try ztf.it(alloc, "test 1", test1);
+        try ztf.it(alloc, "test 2", test2);
+    }
+}.suite);
+
+// Global timeout configuration
+const global*config = ztf.GlobalTimeoutConfig{
+    .default*timeout*ms = 5000,
+    .enabled = true,
+    .allow*extension = true,
+    .max*extension*ms = 30000,
+};
+
+var enforcer = ztf.TimeoutEnforcer.init(allocator, global*config);
+defer enforcer.deinit();
+
+// Timeout context for manual control
+var context = ztf.TimeoutContext.init(allocator, 1000);
+context.start();
+
+// Extend timeout if needed
+try context.extend(500);
+
+// Check status
+if (context.isTimedOut()) {
+    // Handle timeout
+}
+
+context.complete();
+var result = try context.getResult();
+defer result.deinit();
+```
+
+## CLI Usage
+
+```bash
+# Run all tests
+zig-test
+
+# Show help
+zig-test --help
+
+# Use different reporter
+zig-test --reporter dot
+zig-test --reporter json
+
+# Filter tests by name
+zig-test --filter "user"
+
+# Stop on first failure
+zig-test --bail
+
+# Disable colors
+zig-test --no-color
+```
+
+### CLI Options
+
+| Option | Alias | Description |
+|--------|-------|-------------|
+| `--help` | `-h` | Show help message |
+| `--version` | `-v` | Show version information |
+| `--bail` | `-b` | Stop on first failure |
+| `--filter <pattern>` | | Run only tests matching pattern |
+| `--reporter <name>` | | Set reporter (spec, dot, json, tap, junit) |
+| `--junit-output <file>` | | Set the JUnit XML output path |
+| `--timeout <ms>` | | Set the global test timeout |
+| `--retry <N>` | `--retries <N>` | Retry each failed test up to N times |
+| `--repeat <N>` | | Require N successful runs of each selected test |
+| `--fail-on-flaky` | | Fail the run when a retry recovers a failure |
+| `--shuffle` | | Randomize suite, test, and discovered-file order |
+| `--seed <N>` | | Replay a randomized order; implies `--shuffle` |
+| `--verbose` | | Enable verbose output |
+| `--quiet` | `-q` | Minimal output |
+| `--no-color` | | Disable colored output |
+| `--test-dir <dir>` | | Directory to search for tests |
+| `--pattern <pattern>` | | Test file pattern (default: *.test.zig) |
+| `--no-recursive` | | Disable recursive directory search |
+| `--shard-index <N>` | | Run one one-based file shard |
+| `--shard-count <N>` | | Set the total number of file shards |
+| `--coverage` | | Enable code coverage collection |
+| `--coverage-dir <dir>` | | Coverage output directory (default: coverage) |
+| `--coverage-tool <tool>` | | Coverage tool to use (kcov or grindcov) |
+
+## Code Coverage
+
+The framework integrates with external coverage tools to provide comprehensive code coverage reporting including line, branch, and function coverage.
+
+### Prerequisites
+
+Install one of the supported coverage tools:
+
+**kcov (recommended)**:
+
+```bash
+# macOS
+brew install kcov
+
+# Ubuntu/Debian
+sudo apt-get install kcov
+
+# From source
+git clone https://github.com/SimonKagstrom/kcov.git
+cd kcov
+cmake . && make && sudo make install
+```
+
+**grindcov**:
+
+```bash
+# Install Valgrind first
+brew install valgrind  # macOS
+sudo apt-get install valgrind  # Ubuntu/Debian
+
+# Then install grindcov
+pip install grindcov
+```
+
+### Using Coverage
+
+Enable coverage collection with the `--coverage` flag when running tests:
+
+```bash
+# Enable coverage with default settings (kcov)
+zig-test --test-dir tests --coverage
+
+# Specify custom coverage directory
+zig-test --test-dir tests --coverage --coverage-dir my-coverage
+
+# Use grindcov instead of kcov
+zig-test --test-dir tests --coverage --coverage-tool grindcov
+```
+
+### Coverage Output
+
+When coverage is enabled, you'll see a coverage summary after test execution:
+
+```
+Test Summary:
+  Files run: 5
+  Passed: 5
+  Failed: 0
+
+==================== Coverage Summary ====================
+
+  Line Coverage:     245/300 (81.67%)
+  Function Coverage: 45/50 (90.00%)
+  Branch Coverage:   120/150 (80.00%)
+
+  Coverage report: coverage/index.html
+==========================================================
+```
+
+### HTML Coverage Reports
+
+Coverage reports are generated in HTML format and can be viewed in your browser:
+
+```bash
+# Run tests with coverage
+zig-test --test-dir tests --coverage
+
+# Open the HTML report
+open coverage/index.html  # macOS
+xdg-open coverage/index.html  # Linux
+```
+
+The HTML report provides:
+
+- **Line Coverage**: Shows which lines of code were executed
+- **Branch Coverage**: Shows which code branches were taken
+- **Function Coverage**: Shows which functions were called
+- **File-by-file breakdown**: Detailed coverage for each source file
+- **Color-coded highlighting**: Red for uncovered lines, green for covered
+
+### Coverage Features
+
+- **Automatic integration**: Coverage collection is seamlessly integrated with test discovery
+- **Multiple test files**: Coverage is aggregated across all test files
+- **HTML reports**: Rich, interactive HTML reports with syntax highlighting
+- **Graceful fallback**: If coverage tool is not installed, tests run normally without coverage
+- **Flexible configuration**: Choose your coverage tool and output directory
+
+### Coverage Best Practices
+
+1. **Install kcov**: It's faster and more mature than grindcov
+2. **Regular coverage checks**: Run coverage regularly during development
+3. **Set coverage goals**: Aim for >80% line coverage as a baseline
+4. **Review uncovered code**: Use the HTML report to identify untested code paths
+5. **CI/CD integration**: Add coverage checks to your continuous integration pipeline
+
+## Reporters
+
+### Spec Reporter (Default)
+
+Beautiful hierarchical output with colors:
+
+```
+Running 12 test(s)...
+
+Math operations
+  ✓ should add two numbers (0.05ms)
+  ✓ should subtract two numbers (0.03ms)
+  ✓ should multiply two numbers (0.04ms)
+
+String operations
+  ✓ should compare strings (0.02ms)
+  ✓ should check substring (0.03ms)
+
+Test Summary:
+  Total:   12
+  Passed:  12
+  Time:    1.23ms
+```
+
+### Dot Reporter
+
+Minimal output for CI environments:
+
+```
+Running 12 tests:
+............
+
+Passed: 12, Failed: 0, Total: 12 (1.23ms)
+```
+
+### JSON Reporter
+
+Machine-readable output uses the versioned event protocol shared with the live
+UI and test history:
+
+```json
+[
+  {
+    "protocol_version": 1,
+    "type": "run_start",
+    "data": { "total": 12 }
+  },
+  {
+    "protocol_version": 1,
+    "type": "test_end",
+    "data": {
+      "name": "should add two numbers",
+      "suite": "Math operations",
+      "status": "passed",
+      "duration_ns": 50000,
+      "error_message": null
+    }
+  }
+]
+```
+
+See [docs/json-event-protocol.md](docs/json-event-protocol.md) for every event
+type and the compatibility policy.
+
+## API Reference
+
+See [docs/api.md](docs/api.md) for complete API documentation.
+
+## Examples
+
+Check out the `examples/` directory for comprehensive examples:
+
+- `examples/basic*test.zig` - Basic assertions and test structure
+- `examples/advanced*test.zig` - Hooks, matchers, mocking, and advanced features
+- `examples/async*tests.zig` - Async test execution (8 scenarios)
+- `examples/timeout*examples.zig` - Timeout handling (10 scenarios)
+- See `ASYNC*TEST*COMPLETE.md` and `TIMEOUT*COMPLETE.md` for detailed documentation
+
+## Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/zig-utils/zig-test-framework.git
+cd zig-test-framework
+
+# Build the framework
+zig build
+
+# Run self-tests
+zig build test
+
+# Run the basic and advanced examples, and compile-check every example
+zig build examples
+```
+
+The async, snapshot, progress, and timeout examples are compile-checked rather
+than executed by this step because they intentionally demonstrate delays,
+generated files, interactive output, or failure handling.
+
+## Watch Mode
+
+```bash
+zig-test --test-dir tests --watch
+```
+
+After the initial full run, watch mode reruns changed tests or tests affected by
+relative Zig imports. It falls back to the full suite when dependency data is
+incomplete. Type `r` and press Enter to force a full rerun. See
+[docs/watch-mode.md](docs/watch-mode.md) for selection and debounce behavior.
+
+## Requirements
+
+- The exact Zig development build recorded in [`.zig-version`](.zig-version)
+- Linux, macOS, or Windows. All three platforms are required CI targets.
+
+On Windows, discovery accepts native `\\` paths as well as `/` paths and
+launches `zig test` through Zig's portable process API. Ctrl-C and console-close
+events use Windows' native termination behavior; POSIX hosts install cooperative
+SIGINT/SIGTERM handlers for long-running watch and UI modes.
+
+See [TOOLCHAIN.md](TOOLCHAIN.md) for the compatibility policy and upgrade
+process.
+
+## Documentation
+
+Comprehensive guides and API documentation:
+
+### Core Features
+
+- **[Lifecycle Hooks](docs/lifecycle-hooks.md)** - beforeAll, beforeEach, afterEach, afterAll with nested scoping
+- **[Mocking & Spying](docs/mocks.md)** - Complete Jest-compatible mocking API with 20+ methods
+- **[Snapshot Testing](docs/snapshots.md)** - Multiple formats, named snapshots, and diff visualization
+- **[Date & Time Mocking](docs/dates-and-times.md)** - Control time with `setSystemTime()` and Jest-compatible APIs
+- **[Watch Mode](docs/watch-mode.md)** - Affected-test selection, safe fallbacks, and full reruns
+
+### Additional Resources
+
+- **[Examples](examples/)** - Basic and advanced usage examples
+- **[Test Files](tests/)** - Comprehensive test suites demonstrating all features
+- **[API Reference](src/)** - Full source code documentation
+
+### Quick Links
+
+- **Run specific test suites:**
+  - `zig build test-hooks` - Lifecycle hooks tests
+  - `zig build test-mocks` - Mocking and spying tests
+  - `zig build test-snapshots` - Snapshot testing tests
+  - `zig build test-time` - Time mocking tests
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Community
+
+For help, discussion about best practices, or any other conversation that would benefit from being searchable:
+
+[Discussions on GitHub](https://github.com/zig-utils/zig-test-framework/discussions)
+
+For casual chit-chat with others using this package:
+
+[Join the zig-utils Discord Server](https://discord.gg/f7wBym6JF2)
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Roadmap
+
+- [x] Snapshot testing
+- [x] Async/await test support
+- [x] Test timeout handling
+- [x] Code coverage reporting
+- [x] Watch mode for file changes
+- [x] TAP/JUnit reporters
+- [x] Memory profiling
+- [x] Strict JSON configuration files
+- [x] Parallel test execution
+- [x] Retries, repeated runs, and flaky-test reporting
+- [ ] Parameterized tests (it.each)
+- [ ] Property-based testing
+- [ ] IDE integration
+- [ ] Performance benchmarking
+
+## Acknowledgments
+
+Inspired by:
+
+- [Jest](https://jestjs.io/) - JavaScript testing framework
+- [Vitest](https://vitest.dev/) - Vite-native testing framework
+- [Bun Test](https://bun.sh/docs/cli/test) - Bun's built-in test runner
+
+## Support
+
+- GitHub Issues: <https://github.com/zig-utils/zig-test-framework/issues>
+- Documentation: <https://github.com/zig-utils/zig-test-framework/tree/main/docs>
+
+---
+
+Made with ❤️ for the Zig community

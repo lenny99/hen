@@ -12,7 +12,7 @@ const zen_endpoints: OpenAIProvider.Endpoints = .{
 };
 
 fn sessionHeader(alloc: std.mem.Allocator, args: Provider.SessionArgs) anyerror![]const std.http.Header {
-    const session_id = try args.session.toString(alloc);
+    const session_id = try args.session.toStringAlloc(alloc);
     const headers = try alloc.alloc(std.http.Header, 1);
     headers[0] = .{ .name = "x-opencode-session", .value = session_id };
     return headers;

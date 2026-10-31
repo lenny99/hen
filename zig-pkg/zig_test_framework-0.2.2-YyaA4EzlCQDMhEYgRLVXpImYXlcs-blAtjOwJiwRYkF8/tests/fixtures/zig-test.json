@@ -1,0 +1,17 @@
+{
+  "test": {
+    "test_dir": "tests/fixtures",
+    "pattern": "filter_fixture.zig",
+    "recursive": false,
+    "filter": "selected test passes",
+    "retries": 1,
+    "repeat": 2,
+    "fail_on_flaky": false,
+    "shuffle": true,
+    "seed": 42
+  },
+  "sharding": {
+    "index": 1,
+    "count": 1
+  }
+}

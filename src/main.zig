@@ -215,7 +215,7 @@ fn repl(init: std.process.Init, io: std.Io, gpa: std.mem.Allocator) !void {
     var in_buffer: [16 * 1024]u8 = undefined;
     var in = stdin.readerStreaming(io, &in_buffer);
 
-    const id_text = try generator.toString(id);
+    const id_text = try generator.toStringAlloc(id);
     defer gpa.free(id_text);
     try writer.print("hen: session {s}; type a message, `exit` to stop\n", .{id_text});
     try writer.flush();

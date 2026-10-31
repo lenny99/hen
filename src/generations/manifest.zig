@@ -514,7 +514,7 @@ pub fn buildCandidate(
     test_source: ?[]const u8,
 ) BuildError!Candidate {
     const generator = uuid.Generator.init(allocator, io);
-    const id = try generator.toString(try generator.v4());
+    const id = try generator.toStringAlloc(try generator.v4());
     errdefer allocator.free(id);
     return writeCandidate(io, allocator, root, id, parent_id, environ, module_name, module_source, test_source);
 }
