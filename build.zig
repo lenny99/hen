@@ -136,7 +136,9 @@ pub fn build(b: *std.Build) void {
 }
 
 fn rootPath(b: *std.Build, sub_path: []const u8) []const u8 {
-    return b.pathResolve(&.{ b.root.subPathOrDot(), sub_path });
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(b.graph.io, ".", b.allocator) catch @panic("unable to resolve cwd");
+    const joined = b.root.joinString(b.allocator, sub_path) catch @panic("OOM");
+    return b.pathResolve(&.{ cwd, joined });
 }
 
 const ModuleFactory = struct {
@@ -263,6 +265,10 @@ const LibChicken = struct {
             \\src=$1
             \\prefix=$2
             \\force=$3
+            \\if ! chicken_bin=$(command -v chicken); then
+            \\  echo "chicken: bootstrap chicken executable not found in PATH" >&2
+            \\  exit 1
+            \\fi
             \\key=
             \\if head=$(git -C "$src" rev-parse HEAD 2>/dev/null); then
             \\  key="{s}:$head"
@@ -279,7 +285,7 @@ const LibChicken = struct {
             \\  exit 0
             \\fi
             \\cd "$src"
-            \\./configure --prefix "$prefix" --chicken '$(which chicken)/..'
+            \\./configure --prefix "$prefix" --chicken "$chicken_bin"
             \\make -j
             \\make install
             \\if [ -n "$key" ]; then
