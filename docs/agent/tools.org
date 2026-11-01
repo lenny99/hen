@@ -1,0 +1,21 @@
+* Tools
+
+Tools are the explicitly registered tools that the agent can call inside its scheme environment alongsite normal scheme functions. They offer special access to different levels of context. Tools always belong to a module so they always exist in relation to the module itself and its other content like skills and other tools.
+
+The runtime shape of the registry, the call form and the output redaction are
+decided in the [[file:../client-server.plan.org][client-server plan]], in the
+sections [[file:../client-server.plan.org::*Tools][Tools]] and
+[[file:../client-server.plan.org::*Tool output redaction][Tool output redaction]].
+This file records what a tool is and what it carries.
+
+** Context Levels
+
+| Level       | Description                                                                    |
+|-------------+--------------------------------------------------------------------------------|
+| Module      | Module that owns the tool and prefixes the published name                      |
+| Name        | Name of the tool                                                               |
+| Description | Quick explanation of the tool                                                  |
+| Usage       | Usage explanation in context                                                   |
+| Skill?      | Whole document defining usecases, edgecases, conventions, related tools/skills |
+| Source      | Module file that defines the handler procedure                                 |
+

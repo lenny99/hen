@@ -1,0 +1,168 @@
+
+* Client Server Architecture
+Hen should be split up into a client server architecture. The server in this case owns the sessions that are currently running on one machine. First step towards this is using the current state as basically the shape of the server and not the client. The communication mechanism will have to manage a chat "state" that clients have with their session on the server.
+
+The client should be a fast and lean tui that will show the session state to the client. Particulalry for the chat we need to show and stream *thinking* and *messages* from the server to the client. Other parts like *tool calls* can be handled by the server and only shown when finished. In the same way the client would want to chat the agent, make its own scheme calls and be shown information about failures, the session itself or any errors that might happen.
+
+** Communication: UNIX Domain Sockets (stream)
+Messaging between *client* and *server* is handled via unix domain sockets. A hen server only works on a single machine, no tcp, tls or auth. Security is handled via the kernel and filesystem.
+
+** Protocol: MessagePack
+Communication works via /MessagePack/ as an efficient wire format between *client* and *server*. Messagepack allows for length-prefixed and binary-safe transmission of the text contents, therefore extra escaping rules are not needed.
+
+*** Wire Format Tests
+
+1. *Golden frames:* One literal byte array per message type. Decode it,
+   assert every field. Encode the same struct, assert the same bytes.
+   - use a snapshot testing library for this
+2. *Old frames:* Keep the previous protocol version's golden frames.
+   The new server must decode them. This test catches client and
+   server drift.
+3. *Hostile frames:* Truncated, oversized, deeply nested, wrong types.
+   Assert a clean error, no crash, and that parse limits hold.
+
+- Library: =zigcc/zig-msgpack=
+
+** Process model
+The split has two programs. =hen= is the client and the command line. =hend=
+is the supervisor, and one instance runs per machine.
+
+=hend= owns one thread per session. The thread holds the transcript, runs the
+turn, and serves the client connection. Scheme evaluation runs in a child
+process, one child per session. Each child owns one CHICKEN runtime, because
+CHICKEN is process-global and bound to the thread that initializes it
+(=src/environment/root.zig=). A child crash or a hung =(load ...)= costs one
+session, not every session.
+
+=hen= links no CHICKEN. =hend= links no CHICKEN either. Only the child links
+it.
+
+** Worker link
+The session thread talks to its child over the child's standard streams.
+
+- stdin carries requests.
+- stdout carries replies.
+- stderr carries progress frames.
+
+=scheme/env.scm= saves the original error port at start, then redirects
+=(current-error-port)=, so CHICKEN diagnostics never interleave with progress
+frames.
+
+Both links carry MessagePack frames. The client link is the unix socket. The
+worker link is the process streams. A change to one never touches the other.
+
+** Session state and lifetime
+
+- A session id is a uuid. There is no name.
+- Socket: =$XDG_RUNTIME_DIR/hen/<id>.sock=.
+- Session directory: =$XDG_STATE_HOME/hen/sessions/<id>/=, holding =log= and
+  =outputs/<n>=.
+- A session outlives its clients. It ends on =kill= or when =hend= exits.
+- The transcript is an append-only log, one record per message, with a session
+  header first.
+- =hend= keeps finished messages on disk and the turn in flight in memory.
+  The in-memory buffer is bounded by bytes.
+
+On restart, =hend= re-adopts children that are still alive and drops the rest.
+A dropped session keeps its log on disk. Attaching to a dropped session
+returns an error and no transcript.
+
+** Protocol frames
+Version 0 while the work is in progress. The first frame carries the version,
+and a mismatch fails with a clear error.
+
+Client to server: =hello{protocol}=, =attach{session}=, =snapshot=,
+=message{text}=, =eval{source}=, =cancel=, =blob.range{id, offset, limit}=,
+=detach=.
+
+Server to client: =hello{protocol, session}=, =snapshot{messages, seq}=,
+=event{seq, kind, ...}=, =eval.result{...}=, =blob.data{id, offset, data}=,
+=error{code, message}=.
+
+Event kinds: =turn.started=, =message.delta=, =thinking.delta= (reserved),
+=tool.started=, =tool.finished=, =turn.finished=, =turn.cancelled=.
+
+The server owns the transcript. A client asks for a snapshot, gets the
+messages plus a sequence number, then applies events from that number.
+
+** Streaming and cancellation
+The provider stream already separates tool invocations from tool returns
+(=src/instance/message.zig=). The server maps them to =tool.started= and
+=tool.finished=. Tool events describe session tools. They are not an inference
+API concept.
+
+Streaming thinking is reserved in the protocol and deferred in the provider.
+No provider path exists today.
+
+Cancel aborts the provider stream and keeps the partial assistant message,
+marked incomplete. When an eval is running, cancel kills the worker and
+restarts it. The session keeps its transcript and loses its Scheme state.
+
+** Input
+The client treats a line as a chat message. A leading =\= makes the line a
+Scheme evaluation. There is no shell prefix.
+
+An evaluation is one complete expression. An invalid expression reports the
+runtime error to the user. A user evaluation enters the transcript, so the
+model sees both the source and the result.
+
+** Tools
+The registry lives in the session data in =hend=. It is rebuilt at the start
+of each turn by pulling =(hen:tools/list)= from the worker, so it stays correct
+after =register-tool!= and after =hen:registrations/undo!=.
+
+A tool record carries module, name, description, usage and skill. The handler
+is a reference to the implementing procedure, not a lambda. Registration
+resolves the reference and fails when it is not a procedure.
+
+The handler's parameter list is the argument declaration:
+=(lambda (#!key path (limit 65536)) ...)=. =procedure-information= returns it,
+including defaults, inside a module body. Argument types are deferred.
+
+Call form for the agent and the user:
+=(hen:tools/call! 'cool-tool #:name "Cool Guy")=.
+
+=hend= imports every module into the interaction environment after loading it,
+so the model can call a module binding directly. This removes the module wall
+recorded in [[file:plugin-api.org][plugin-api]]. The registry is then an index, not a
+security boundary.
+
+The provider still sees one tool, =hen-eval=, plus the catalog text in its
+description: one =name: summary (when)= line per tool. Forwarding each tool to
+the provider as a structured tool waits for argument types.
+
+The tool model itself, its context levels and the record fields, are in
+[[file:agent/tools.org][tools]].
+
+** Tool output redaction
+Every observation is redacted by one rule: the first 2 KiB of text, the total
+byte count, and an output id. The full text goes to a file under the session
+directory, named by that id. The transcript record holds the id and the
+redacted view.
+
+A user evaluation can bind the full value to a variable. The variable stays
+reachable in the worker.
+
+The client shows the redacted view and fetches ranges over the protocol with
+=blob.range=. Reading the full output through a tool is deferred.
+
+** Client
+The client is a libvaxis TUI. There is no plain mode. One client per session
+for now.
+
+=hen= with no arguments starts =hend= when it is not running, then starts a
+session. =hen ls= lists sessions. =hen attach <id>= attaches.
+
+** Gate and generations
+The gate is a deterministic step inside rollback and inside generation
+creation. It is not a tool. Rollback and generation creation as tools are
+deferred.
+
+** Deferred
+
+- Streaming thinking in the provider.
+- A tool that reads a full tool output.
+- Generation tools: rollback, creation, gate.
+- A viewer for a dropped session's history.
+- Argument types for tools, and structured tool forwarding.
+- The difference between async and blocking actions.

@@ -2,8 +2,10 @@
 vendor-out/
 zig-out/
 /generations/
+.work/
 
 # Agents
+.agents/
 .autolith/
 .nodecode/
 .opencode/

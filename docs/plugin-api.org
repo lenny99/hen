@@ -1,6 +1,6 @@
 * Plugin API --- big picture
 Draft for discussion. It states what a plugin author writes and what hen
-promises around it. It sits on top of =docs/agent-loop.org= phases #3,
+promises around it. It sits on top of [[file:agent/loop.org][agent-loop doc]] phases #3,
 #5, and #8, and it does not change the ownership split there. The open
 questions in section 17 are answered in place (2026-10-25); the body
 carries those answers.
@@ -9,10 +9,10 @@ carries those answers.
 A plugin is a Scheme source file in a generation that contributes tools.
 It declares the tools it offers, the configuration those tools need, and
 the capabilities it expects to use. It never owns the process, the event
-loop, provider sockets, or the UI (=docs/libraries.org=, governing rule).
+loop, provider sockets, or the UI ([[file:techonology/libraries.org][libraries]], governing rule).
 
 The plugin layer is the only mutable layer. The bridge, the loop, and
-the provider code stay fixed (=docs/agent-loop.org=, Phase #8).
+the provider code stay fixed ([[file:agent/loop.org][agent-loop doc]], Phase #8).
 Self-modification means: add, change, or remove tool modules and the
 registry.
 
@@ -69,13 +69,19 @@ its imports, and the =register-module!= call.
 Decided 2026-10-25 (open question 2): the loader owns the module wall.
 The manifest names each module, and the host loads each source file
 through a module wrapper --- the body-as-single-string include form
-(=manual/Modules:82-83=). The wall matters because =hen:eval!= evaluates
-the model's expressions in the interaction environment (agent-loop doc,
-Phase #7): inside the wrapper, a plugin's internals are invisible there,
-and the model's only route to a tool is =hen:tools/call!=. Modules are
+(=manual/Modules:82-83=). The wall mattered because =hen:eval!= evaluates
+the model's expressions in the interaction environment ([[file:agent/loop.org][agent-loop doc]],
+Phase #7): inside the wrapper, a plugin's internals were invisible there,
+and the model's only route to a tool was =hen:tools/call!=. Modules are
 visibility control only, not separate environments
-(=manual/Modules:101-105=), so the wrapper is a wall, not isolation;
+(=manual/Modules:101-105=), so the wrapper was a wall, not isolation;
 isolation stays a process property (section 14).
+
+Decided 2026-11-01 (client-server plan): the wall is removed. =hend= imports
+every module into the interaction environment after the module loads, so the
+model reaches a module binding directly. =hen:tools/call!= stays as one
+route, not the only route. The registry becomes an index, not a security
+boundary. See [[file:client-server.plan.org][client-server plan]].
 
 Decided 2026-10-30 (hen-82r.6): the loader's actual wrapper is
 =(module <name> * (import scheme (chicken base) (chicken condition) (chicken port) hen-plugin) (register-module! '<name>) (include "<abs path>") (and #t))=
@@ -91,10 +97,10 @@ wrapper, because =##sys#current-module= is not bound at body-run time
 --- the loader calls it on the plugin's behalf, and the plugin source
 carries only =register-tool!= and =config= calls; and the =(and #t)=
 tail keeps =Interpreter.eval='s written result tiny. Separately, =*= in
-the export-list position is broken in interpreted modules for real
-exports (verified against the vendored runtime in a probe), so it is
-used only for these never-imported wrappers and every module other code
-imports uses an explicit export list. Registration forms also stay
+the export-list position works for interpreted modules: a probe loaded the
+wrapper with =*=, imported the module, and called an exported procedure
+through =eval= (2026-11-01, corrected). The wrapper keeps =*=. Registration
+forms also stay
 toplevel-visible: =scheme/env.scm= ends in a toplevel =(import hen)=, so
 bare registration names work on the host and test path --- model
 reachability of those forms is an accepted looseness until a sandbox
@@ -123,23 +129,26 @@ A =define-tool= macro can arrive later, when plugins are compiled with
 
 Decided: loading a module does not publish anything by itself. A plugin
 cannot reach another plugin's bindings: each source loads inside its own
-wrapper. The registry and the documentation store are built only from
-=register-module!=, =register-tool!=, and =register-skill!= calls, so
-the gate's registry diff (Phase #8) has an explicit list to compare.
+wrapper. The model can reach them: =hend= imports each module into the
+interaction environment (2026-11-01, see above). The registry and the
+documentation store are built only from =register-module!=,
+=register-tool!=, and =register-skill!= calls, so the gate's registry diff
+(Phase #8) has an explicit list to compare.
 
 Decided 2026-10-25: a module splits across files with
 =include-relative=, never with =load=. An included file's forms splice
 into the enclosing module body at expansion time --- same namespace,
-same wall --- and the path resolves relative to the including file, so a
-published plugin works from any process directory
+same module record --- and the path resolves relative to the including
+file, so a published plugin works from any process directory
 (=manual/Module (chicken base):1145-1150=). The manifest names only the
 entry file; the includes are the plugin's own business, and the
 generation's content hash covers every included file. =load= escapes the
-wall: it hands each expression to =eval= in the interaction environment,
-where the model can reach the names, so the gate lint rejects a =load=
-call in plugin sources (that particular check is not implemented yet ---
-section 13 lists today's lint scope). A module body sees only what it
-imports, so =hen-plugin= re-exports =include-relative=.
+wrapper: it hands each expression to =eval= in the interaction environment,
+so a plugin can clobber the model's names and skip the module record. The
+gate lint rejects a =load= call in plugin sources (that particular check is
+not implemented yet --- section 13 lists today's lint scope).
+A module body sees only what it imports, so =hen-plugin= re-exports
+=include-relative=.
 
 Decided 2026-10-25: a plugin may import its declared dependencies ---
 egg units the runtime resolved for the generation (section 12) --- and
@@ -663,7 +672,7 @@ the gate's view coherent; shape B stays the real isolation.
 
 Decided: A through M4. B before =spawn=, =promote=, and =discard= become
 model-facing tools, because promotion without isolation is not
-promotion. The framed protocol follows the shape of =docs/libraries.org=
+promotion. The framed protocol follows the shape of [[file:techonology/libraries.org][libraries]]
 1.4: length-prefixed frames over a pipe or Unix socket, request routing,
 cancellation, health checks, drain --- with s-expression payloads, not
 JSON frames (open question 3).
