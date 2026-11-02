@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const msgpack = @import("msgpack");
 
 pub const Address = std.Io.net.UnixAddress;
 pub const Server = std.Io.net.Server;

@@ -31,3 +31,11 @@ test "listen accepts one connection and moves bytes" {
     try reader.interface.readSliceAll(&got);
     try std.testing.expectEqualStrings("ping", &got);
 }
+
+test "msgpack dependency encodes a value" {
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const encoder = socket.msgpack.Encoder{ .writer = &writer };
+    try encoder.write(socket.msgpack.Payload.uintToPayload(1));
+    try std.testing.expectEqual(@as(u8, 0x01), buffer[0]);
+}

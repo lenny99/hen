@@ -40,6 +40,10 @@
             .url = "https://github.com/zig-utils/zig-test-framework/archive/refs/heads/main.tar.gz",
             .hash = "zig_test_framework-0.2.2-YyaA4EzlCQDMhEYgRLVXpImYXlcs-blAtjOwJiwRYkF8",
         },
+        .zig_msgpack = .{
+            .url = "https://codeload.github.com/zigcc/zig-msgpack/tar.gz/5884caaa3fcbcd315dbe88c3033e1fc60142071a",
+            .hash = "zig_msgpack-0.0.19-evvueNR-BQBqKazGShn1eDXelQwAQz60su5SfPNB9lQk",
+        },
     },
     .paths = .{
         "build.zig",

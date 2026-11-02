@@ -19,6 +19,9 @@ pub fn build(b: *std.Build) void {
     const uuid = b.dependency("uuid", .{ .target = target });
     const ztf = b.dependency("zig-test-framework", .{ .target = target });
 
+    const msgpack_dep = b.dependency("zig_msgpack", .{ .target = target, .optimize = optimize });
+    const msgpack_import = std.Build.Module.Import{ .name = "msgpack", .module = msgpack_dep.module("msgpack") };
+
     const factory = ModuleFactory{
         .b = b,
         .target = target,
@@ -89,6 +92,7 @@ pub fn build(b: *std.Build) void {
     const socket = factory.module(.{
         .name = "socket",
         .root = "src/socket/root.zig",
+        .imports = &.{msgpack_import},
     });
     factory.testModule(socket, .{
         .root = "tests/socket/root.zig",
