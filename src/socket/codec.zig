@@ -1,4 +1,5 @@
 const std = @import("std");
+const msgpack = @import("msgpack");
 
 pub const max_frame_bytes: usize = 4 * 1024 * 1024;
 
@@ -26,4 +27,20 @@ pub fn readFrame(alloc: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
         else => |rest| return rest,
     };
     return payload;
+}
+
+pub const parse_limits = msgpack.ParseLimits{
+    .max_depth = 32,
+    .max_array_length = 100_000,
+    .max_map_size = 100_000,
+};
+
+pub fn encodeValue(writer: *std.Io.Writer, value: msgpack.Payload) !void {
+    const encoder = msgpack.Encoder{ .writer = writer };
+    try encoder.write(value);
+}
+
+pub fn decodeValue(alloc: std.mem.Allocator, reader: *std.Io.Reader) !msgpack.Payload {
+    const decoder = msgpack.Decoder{ .reader = reader, .limits = parse_limits };
+    return decoder.read(alloc);
 }
