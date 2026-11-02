@@ -1,3 +1,7 @@
+:PROPERTIES:
+:ISSUE-ID: hen-m15
+:END:
+
 
 * Client Server Architecture
 Hen should be split up into a client server architecture. The server in this case owns the sessions that are currently running on one machine. First step towards this is using the current state as basically the shape of the server and not the client. The communication mechanism will have to manage a chat "state" that clients have with their session on the server.
@@ -5,9 +9,15 @@ Hen should be split up into a client server architecture. The server in this cas
 The client should be a fast and lean tui that will show the session state to the client. Particulalry for the chat we need to show and stream *thinking* and *messages* from the server to the client. Other parts like *tool calls* can be handled by the server and only shown when finished. In the same way the client would want to chat the agent, make its own scheme calls and be shown information about failures, the session itself or any errors that might happen.
 
 ** Communication: UNIX Domain Sockets (stream)
+:PROPERTIES:
+:ISSUE-ID: hen-m15.1
+:END:
 Messaging between *client* and *server* is handled via unix domain sockets. A hen server only works on a single machine, no tcp, tls or auth. Security is handled via the kernel and filesystem.
 
 ** Protocol: MessagePack
+:PROPERTIES:
+:ISSUE-ID: hen-m15.2
+:END:
 Communication works via /MessagePack/ as an efficient wire format between *client* and *server*. Messagepack allows for length-prefixed and binary-safe transmission of the text contents, therefore extra escaping rules are not needed.
 
 *** Wire Format Tests
@@ -24,6 +34,9 @@ Communication works via /MessagePack/ as an efficient wire format between *clien
 - Library: =zigcc/zig-msgpack=
 
 ** Process model
+:PROPERTIES:
+:ISSUE-ID: hen-m15.3
+:END:
 The split has two programs. =hen= is the client and the command line. =hend=
 is the supervisor, and one instance runs per machine.
 
@@ -38,6 +51,9 @@ session, not every session.
 it.
 
 ** Worker link
+:PROPERTIES:
+:ISSUE-ID: hen-m15.4
+:END:
 The session thread talks to its child over the child's standard streams.
 
 - stdin carries requests.
@@ -52,6 +68,9 @@ Both links carry MessagePack frames. The client link is the unix socket. The
 worker link is the process streams. A change to one never touches the other.
 
 ** Session state and lifetime
+:PROPERTIES:
+:ISSUE-ID: hen-m15.5
+:END:
 
 - A session id is a uuid. There is no name.
 - Socket: =$XDG_RUNTIME_DIR/hen/<id>.sock=.
@@ -68,6 +87,9 @@ A dropped session keeps its log on disk. Attaching to a dropped session
 returns an error and no transcript.
 
 ** Protocol frames
+:PROPERTIES:
+:ISSUE-ID: hen-m15.6
+:END:
 Version 0 while the work is in progress. The first frame carries the version,
 and a mismatch fails with a clear error.
 
@@ -86,6 +108,9 @@ The server owns the transcript. A client asks for a snapshot, gets the
 messages plus a sequence number, then applies events from that number.
 
 ** Streaming and cancellation
+:PROPERTIES:
+:ISSUE-ID: hen-m15.7
+:END:
 The provider stream already separates tool invocations from tool returns
 (=src/instance/message.zig=). The server maps them to =tool.started= and
 =tool.finished=. Tool events describe session tools. They are not an inference
@@ -99,6 +124,9 @@ marked incomplete. When an eval is running, cancel kills the worker and
 restarts it. The session keeps its transcript and loses its Scheme state.
 
 ** Input
+:PROPERTIES:
+:ISSUE-ID: hen-m15.8
+:END:
 The client treats a line as a chat message. A leading =\= makes the line a
 Scheme evaluation. There is no shell prefix.
 
@@ -107,6 +135,9 @@ runtime error to the user. A user evaluation enters the transcript, so the
 model sees both the source and the result.
 
 ** Tools
+:PROPERTIES:
+:ISSUE-ID: hen-m15.9
+:END:
 The registry lives in the session data in =hend=. It is rebuilt at the start
 of each turn by pulling =(hen:tools/list)= from the worker, so it stays correct
 after =register-tool!= and after =hen:registrations/undo!=.
@@ -135,6 +166,9 @@ The tool model itself, its context levels and the record fields, are in
 [[file:agent/tools.org][tools]].
 
 ** Tool output redaction
+:PROPERTIES:
+:ISSUE-ID: hen-m15.10
+:END:
 Every observation is redacted by one rule: the first 2 KiB of text, the total
 byte count, and an output id. The full text goes to a file under the session
 directory, named by that id. The transcript record holds the id and the
@@ -147,6 +181,9 @@ The client shows the redacted view and fetches ranges over the protocol with
 =blob.range=. Reading the full output through a tool is deferred.
 
 ** Client
+:PROPERTIES:
+:ISSUE-ID: hen-m15.11
+:END:
 The client is a libvaxis TUI. There is no plain mode. One client per session
 for now.
 
@@ -154,15 +191,13 @@ for now.
 session. =hen ls= lists sessions. =hen attach <id>= attaches.
 
 ** Gate and generations
+:PROPERTIES:
+:ISSUE-ID: hen-m15.12
+:END:
 The gate is a deterministic step inside rollback and inside generation
 creation. It is not a tool. Rollback and generation creation as tools are
 deferred.
 
-** Deferred
+*** Deferred
 
-- Streaming thinking in the provider.
-- A tool that reads a full tool output.
-- Generation tools: rollback, creation, gate.
-- A viewer for a dropped session's history.
-- Argument types for tools, and structured tool forwarding.
-- The difference between async and blocking actions.
+

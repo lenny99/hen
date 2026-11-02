@@ -1,0 +1,7 @@
+* TODO Streaming thinking in the provider.
+* TODO A tool that reads a full tool output.
+* TODO Generation tools: rollback, creation, gate.
+* TODO A viewer for a dropped session's history.
+* TODO Argument types for tools, and structured tool forwarding.
+* TODO The difference between async and blocking actions.
+ 
