@@ -195,3 +195,34 @@ test "golden: map" {
     try std.testing.expect(got != null);
     try std.testing.expectEqual(@as(u64, 1), got.?.uint);
 }
+
+fn expectDecodeError(bytes: []const u8) !void {
+    var reader = std.Io.Reader.fixed(bytes);
+    if (codec.decodeValue(std.testing.allocator, &reader)) |payload| {
+        var back = payload;
+        back.free(std.testing.allocator);
+        return error.ExpectedDecodeError;
+    } else |_| {}
+}
+
+test "hostile: deep nesting is rejected" {
+    var bytes: [34]u8 = undefined;
+    for (bytes[0..33]) |*b| b.* = 0x91;
+    bytes[33] = 0xc0;
+    var reader = std.Io.Reader.fixed(&bytes);
+    try std.testing.expectError(error.MaxDepthExceeded, codec.decodeValue(std.testing.allocator, &reader));
+}
+
+test "hostile: oversized string header is rejected" {
+    var reader = std.Io.Reader.fixed(&.{ 0xdb, 0xff, 0xff, 0xff, 0xff });
+    try std.testing.expectError(error.StringTooLong, codec.decodeValue(std.testing.allocator, &reader));
+}
+
+test "hostile: reserved marker is rejected" {
+    try expectDecodeError(&.{0xc1});
+}
+
+test "hostile: truncated map is rejected" {
+    var reader = std.Io.Reader.fixed(&.{ 0x81, 0xa1, 'k' });
+    try std.testing.expectError(error.EndOfStream, codec.decodeValue(std.testing.allocator, &reader));
+}
