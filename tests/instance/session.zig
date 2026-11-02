@@ -680,3 +680,19 @@ test "run hands the provider the cataloged action tool" {
         "\nalpha-pin: Returns the fixture value. (A pin tool answers one value.)";
     try expect(call.tools[0].description).toEqual(expected);
 }
+
+test "turn returns the messages it added" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+    const session = &f.session;
+
+    try f.mock.returns(&.{.{ .delta = "Hi!" }});
+
+    const added = try session.turn(std.testing.io, alloc, "hello");
+
+    try expect(added).toHaveLength(1);
+    try expect(added[0].assistant.content).toEqual("Hi!");
+    try expect(session.messages.items).toHaveLength(2);
+}

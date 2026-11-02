@@ -86,6 +86,15 @@ pub fn build(b: *std.Build) void {
     });
     const http_import = std.Build.Module.Import{ .name = http.name, .module = http.module };
 
+    const socket = factory.module(.{
+        .name = "socket",
+        .root = "src/socket/root.zig",
+    });
+    factory.testModule(socket, .{
+        .root = "tests/socket/root.zig",
+        .name = "socket-tests",
+    });
+
     factory.testModule(instance, .{
         .root = "tests/instance/session.zig",
         .name = "instance-session-tests",

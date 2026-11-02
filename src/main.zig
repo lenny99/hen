@@ -223,24 +223,16 @@ fn repl(init: std.process.Init, io: std.Io, gpa: std.mem.Allocator) !void {
     while (true) {
         try writer.print("\n> ", .{});
         try writer.flush();
-
-        // End-of-stream counts as the end of the line, and `null` means the
-        // input is done.
         const line = (try in.interface.takeDelimiter('\n')) orelse break;
         const message = std.mem.trim(u8, line, " \t\r");
         if (message.len == 0) continue;
         if (std.mem.eql(u8, message, "exit")) break;
-
-        try session.appendMessage(gpa, message);
-
-        const before = session.messages.items.len;
-        session.run(io, gpa) catch |err| {
+        const added = session.turn(io, gpa, message) catch |err| {
             try writer.print("[provider error: {t}]\n", .{err});
             try writer.flush();
             continue;
         };
-
-        for (session.messages.items[before..]) |msg| {
+        for (added) |msg| {
             switch (msg) {
                 .assistant => |assistant| try writer.print("{s}\n", .{assistant.content}),
                 .tool => |output| try writer.print("{s}\n", .{output.content}),

@@ -141,6 +141,18 @@ pub const Session = struct {
     /// answer. Docs phase #4: default 8, set on the session.
     max_rounds: usize = 8,
 
+    pub fn turn(
+        self: *Session,
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        message: []const u8,
+    ) ![]const Message {
+        try self.appendMessage(alloc, message);
+        const before = self.messages.items.len;
+        try self.run(io, alloc);
+        return self.messages.items[before..];
+    }
+
     pub fn init(id: Id, provider: *const Provider) !Session {
         return .{
             .id = id,
