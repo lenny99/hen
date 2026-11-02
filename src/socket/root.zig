@@ -4,6 +4,7 @@ pub const msgpack = @import("msgpack");
 pub const Address = std.Io.net.UnixAddress;
 pub const Server = std.Io.net.Server;
 pub const Stream = std.Io.net.Stream;
+pub const codec = @import("codec.zig");
 
 pub const default_kernel_backlog: u31 = 16;
 

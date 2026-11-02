@@ -98,6 +98,10 @@ pub fn build(b: *std.Build) void {
         .root = "tests/socket/root.zig",
         .name = "socket-tests",
     });
+    factory.testModule(socket, .{
+        .root = "tests/socket/codec.zig",
+        .name = "socket-codec-tests",
+    });
 
     factory.testModule(instance, .{
         .root = "tests/instance/session.zig",
