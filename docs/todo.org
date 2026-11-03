@@ -4,4 +4,4 @@
 * TODO A viewer for a dropped session's history.
 * TODO Argument types for tools, and structured tool forwarding.
 * TODO The difference between async and blocking actions.
- 
+* TODO Logging for client and server
