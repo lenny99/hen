@@ -11,8 +11,8 @@ test "request round trip" {
     const request = worker.Request{
         .alloc = alloc,
         .op = .call,
-        .name = @constCast("echo"),
-        .arguments = @constCast("(1 2)"),
+        .tool = @constCast("echo"),
+        .scheme = @constCast("(1 2)"),
     };
     try worker.writeRequest(alloc, &writer, request);
 
@@ -20,8 +20,8 @@ test "request round trip" {
     var back = try worker.readRequest(alloc, &reader);
     defer back.deinit();
     try std.testing.expectEqual(worker.Op.call, back.op);
-    try std.testing.expectEqualStrings("echo", back.name);
-    try std.testing.expectEqualStrings("(1 2)", back.arguments);
+    try std.testing.expectEqualStrings("echo", back.tool);
+    try std.testing.expectEqualStrings("(1 2)", back.scheme);
 }
 
 test "reply round trip" {

@@ -4,22 +4,55 @@ const msgpack = @import("msgpack");
 
 pub const version: u32 = 0;
 
+pub const session_id_len = 36;
+
+pub const SessionId = [session_id_len]u8;
+
+pub fn sessionIdFromText(text: []const u8) !SessionId {
+    if (text.len != session_id_len) return error.InvalidSessionId;
+    var id: SessionId = undefined;
+    @memcpy(&id, text);
+    return id;
+}
+
+pub const EventKind = enum {
+    assistant,
+    tool,
+    user,
+    turn_finished,
+
+    pub fn wireName(self: EventKind) []const u8 {
+        return switch (self) {
+            .turn_finished => "turn.finished",
+            else => @tagName(self),
+        };
+    }
+
+    pub fn parse(text: []const u8) !EventKind {
+        if (std.mem.eql(u8, text, "turn.finished")) return .turn_finished;
+        if (std.mem.eql(u8, text, "assistant")) return .assistant;
+        if (std.mem.eql(u8, text, "tool")) return .tool;
+        if (std.mem.eql(u8, text, "user")) return .user;
+        return error.UnknownEventKind;
+    }
+};
+
 pub const ClientFrame = union(enum) {
     hello: u32,
     new,
     ls,
-    attach: []const u8,
+    attach: SessionId,
     detach,
     snapshot,
     message: []const u8,
 };
 
 pub const ServerFrame = union(enum) {
-    hello: struct { protocol: u32, session: []const u8 },
-    attached: []const u8,
-    sessions: []const []const u8,
+    hello: struct { protocol: u32, session: ?SessionId },
+    attached: SessionId,
+    sessions: []const SessionId,
     snapshot: struct { messages: []const []const u8, seq: u64 },
-    event: struct { seq: u64, kind: []const u8, text: []const u8 },
+    event: struct { seq: u64, kind: EventKind, text: []const u8 },
     failure: struct { code: []const u8, message: []const u8 },
 };
 
@@ -35,6 +68,14 @@ fn putStrArray(alloc: std.mem.Allocator, payload: *msgpack.Payload, key: []const
     const items = try alloc.alloc(msgpack.Payload, values.len);
     for (values, 0..) |value, index| {
         items[index] = try msgpack.Payload.strToPayload(value, alloc);
+    }
+    try payload.map.put(strKey(key), .{ .arr = items });
+}
+
+fn putSessionArray(alloc: std.mem.Allocator, payload: *msgpack.Payload, key: []const u8, ids: []const SessionId) !void {
+    const items = try alloc.alloc(msgpack.Payload, ids.len);
+    for (ids, 0..) |id, index| {
+        items[index] = try msgpack.Payload.strToPayload(id[0..], alloc);
     }
     try payload.map.put(strKey(key), .{ .arr = items });
 }
@@ -74,7 +115,7 @@ pub fn writeClientFrame(alloc: std.mem.Allocator, writer: *std.Io.Writer, frame:
         .ls => try putStr(alloc, &payload, "type", "ls"),
         .attach => |session| {
             try putStr(alloc, &payload, "type", "attach");
-            try putStr(alloc, &payload, "session", session);
+            try putStr(alloc, &payload, "session", session[0..]);
         },
         .detach => try putStr(alloc, &payload, "type", "detach"),
         .snapshot => try putStr(alloc, &payload, "type", "snapshot"),
@@ -97,7 +138,7 @@ pub fn readClientFrame(arena: std.mem.Allocator, reader: *std.Io.Reader) !Client
     if (std.mem.eql(u8, kind, "new")) return .new;
     if (std.mem.eql(u8, kind, "ls")) return .ls;
     if (std.mem.eql(u8, kind, "attach")) {
-        return .{ .attach = (try stringField(payload, "session")) orelse return error.MissingField };
+        return .{ .attach = try sessionIdFromText((try stringField(payload, "session")) orelse return error.MissingField) };
     }
     if (std.mem.eql(u8, kind, "detach")) return .detach;
     if (std.mem.eql(u8, kind, "snapshot")) return .snapshot;
@@ -115,15 +156,15 @@ pub fn writeServerFrame(alloc: std.mem.Allocator, writer: *std.Io.Writer, frame:
         .hello => |hello| {
             try putStr(alloc, &payload, "type", "hello");
             try payload.map.put(strKey("protocol"), .{ .uint = hello.protocol });
-            try putStr(alloc, &payload, "session", hello.session);
+            if (hello.session) |session| try putStr(alloc, &payload, "session", session[0..]);
         },
         .attached => |session| {
             try putStr(alloc, &payload, "type", "attached");
-            try putStr(alloc, &payload, "session", session);
+            try putStr(alloc, &payload, "session", session[0..]);
         },
         .sessions => |ids| {
             try putStr(alloc, &payload, "type", "sessions");
-            try putStrArray(alloc, &payload, "ids", ids);
+            try putSessionArray(alloc, &payload, "ids", ids);
         },
         .snapshot => |snapshot| {
             try putStr(alloc, &payload, "type", "snapshot");
@@ -133,7 +174,7 @@ pub fn writeServerFrame(alloc: std.mem.Allocator, writer: *std.Io.Writer, frame:
         .event => |event| {
             try putStr(alloc, &payload, "type", "event");
             try payload.map.put(strKey("seq"), .{ .uint = event.seq });
-            try putStr(alloc, &payload, "kind", event.kind);
+            try putStr(alloc, &payload, "kind", event.kind.wireName());
             try putStr(alloc, &payload, "text", event.text);
         },
         .failure => |failure| {
@@ -151,21 +192,22 @@ pub fn readServerFrame(arena: std.mem.Allocator, reader: *std.Io.Reader) !Server
     const payload = try codec.decodeValue(arena, &fixed);
     const kind = (try stringField(payload, "type")) orelse return error.MissingType;
     if (std.mem.eql(u8, kind, "hello")) {
+        const session_text = try stringField(payload, "session");
         return .{ .hello = .{
             .protocol = @intCast((try uintField(payload, "protocol")) orelse return error.MissingField),
-            .session = (try stringField(payload, "session")) orelse "",
+            .session = if (session_text) |text| try sessionIdFromText(text) else null,
         } };
     }
     if (std.mem.eql(u8, kind, "attached")) {
-        return .{ .attached = (try stringField(payload, "session")) orelse return error.MissingField };
+        return .{ .attached = try sessionIdFromText((try stringField(payload, "session")) orelse return error.MissingField) };
     }
     if (std.mem.eql(u8, kind, "sessions")) {
         const value = (try payload.mapGet("ids")) orelse return error.MissingField;
         if (value != .arr) return error.WrongType;
-        const ids = try arena.alloc([]const u8, value.arr.len);
+        const ids = try arena.alloc(SessionId, value.arr.len);
         for (value.arr, 0..) |item, index| {
             if (item != .str) return error.WrongType;
-            ids[index] = item.str.str;
+            ids[index] = try sessionIdFromText(item.str.str);
         }
         return .{ .sessions = ids };
     }
@@ -185,7 +227,7 @@ pub fn readServerFrame(arena: std.mem.Allocator, reader: *std.Io.Reader) !Server
     if (std.mem.eql(u8, kind, "event")) {
         return .{ .event = .{
             .seq = (try uintField(payload, "seq")) orelse 0,
-            .kind = (try stringField(payload, "kind")) orelse "",
+            .kind = try EventKind.parse((try stringField(payload, "kind")) orelse return error.MissingField),
             .text = (try stringField(payload, "text")) orelse "",
         } };
     }

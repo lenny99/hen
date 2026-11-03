@@ -100,146 +100,16 @@ fn serve(init: std.process.Init) !void {
             else => return err,
         };
         defer stream.close(io);
-        serveConnection(io, gpa, &stream, &backend, model) catch |err| {
+        var worker: worker_mod.Worker = undefined;
+        worker.init(io) catch |err| {
+            std.debug.print("hend: worker start failed: {t}\n", .{err});
+            continue;
+        };
+        defer worker.stop(io, gpa);
+
+        worker.serve(io, gpa, &stream, &backend, model) catch |err| {
             std.debug.print("hend: connection ended: {t}\n", .{err});
         };
     }
 }
 
-fn serveConnection(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    stream: *socket.Stream,
-    backend: *instance.Provider,
-    model: ?instance.Model,
-) !void {
-    var read_buffer: [64 * 1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buffer);
-    var write_buffer: [64 * 1024]u8 = undefined;
-    var writer = stream.writer(io, &write_buffer);
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-
-    var session: ?instance.Session = null;
-    defer if (session) |*value| value.deinit(gpa);
-    var session_id: []u8 = &.{};
-
-    var worker: worker_mod.Worker = undefined;
-    var worker_started = false;
-    var bridge: worker_mod.Bridge = undefined;
-    var environment_iface: instance.Environment = undefined;
-    defer if (worker_started) worker.stop(io, gpa);
-
-    var seq: u64 = 0;
-
-    while (true) {
-        _ = arena.reset(.retain_capacity);
-        const frame = protocol.readClientFrame(arena.allocator(), &reader.interface) catch |err| switch (err) {
-            error.TruncatedFrame => return,
-            else => return err,
-        };
-
-        switch (frame) {
-            .hello => |version| {
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .hello = .{
-                    .protocol = protocol.version,
-                    .session = if (session != null) session_id else "",
-                } });
-                _ = version;
-            },
-            .new => {
-                if (session != null) {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "busy", .message = "session exists" } });
-                    continue;
-                }
-                worker.init(io) catch |err| {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "worker", .message = @errorName(err) } });
-                    continue;
-                };
-                worker_started = true;
-                bridge = .{ .worker = &worker };
-                environment_iface = bridge.environment();
-                const generator = uuid.Generator.init(gpa, io);
-                const id = try generator.v4();
-                session = try instance.Session.init(id, backend);
-                session.?.environment = &environment_iface;
-                if (worker.tools(gpa)) |listing| {
-                    defer gpa.free(listing);
-                    var entries: std.ArrayList(instance.Session.CatalogEntry) = .empty;
-                    defer entries.deinit(gpa);
-                    var lines = std.mem.splitScalar(u8, listing, '\n');
-                    while (lines.next()) |line| {
-                        if (line.len == 0) continue;
-                        var fields = std.mem.splitScalar(u8, line, '\t');
-                        const name = fields.next() orelse continue;
-                        const summary = fields.next() orelse "";
-                        const when = fields.next() orelse "";
-                        try entries.append(gpa, .{ .name = name, .summary = summary, .when = when });
-                    }
-                    try session.?.setCatalog(gpa, entries.items);
-                } else |_| {}
-                if (model) |*value| session.?.model = value;
-                session_id = try std.fmt.allocPrint(arena.allocator(), "{f}", .{id});
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .attached = session_id });
-            },
-            .ls => {
-                const ids = [_][]const u8{session_id};
-                const list: []const []const u8 = if (session != null) &ids else &.{};
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .sessions = list });
-            },
-            .attach => |id| {
-                if (session == null or !std.mem.eql(u8, id, session_id)) {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "unknown_session", .message = "no such session" } });
-                    continue;
-                }
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .attached = session_id });
-            },
-            .detach => return,
-            .snapshot => {
-                if (session == null) {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "no_session", .message = "start a session first" } });
-                    continue;
-                }
-                const texts = try collectMessages(arena.allocator(), session.?);
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .snapshot = .{ .messages = texts, .seq = seq } });
-            },
-            .message => |text| {
-                if (session == null) {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "no_session", .message = "start a session first" } });
-                    continue;
-                }
-                const added = session.?.turn(io, gpa, text) catch |err| {
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "turn", .message = @errorName(err) } });
-                    continue;
-                };
-                for (added) |message| {
-                    seq += 1;
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .event = .{
-                        .seq = seq,
-                        .kind = @tagName(message),
-                        .text = messageText(message),
-                    } });
-                }
-                seq += 1;
-                try protocol.writeServerFrame(gpa, &writer.interface, .{ .event = .{ .seq = seq, .kind = "turn.finished", .text = "" } });
-            },
-        }
-    }
-}
-
-fn messageText(message: instance.Message) []const u8 {
-    return switch (message) {
-        .assistant => |value| value.content,
-        .tool => |value| value.content,
-        .user => |value| value.content,
-    };
-}
-
-fn collectMessages(arena: std.mem.Allocator, session: instance.Session) ![]const []const u8 {
-    const texts = try arena.alloc([]const u8, session.messages.items.len);
-    for (session.messages.items, 0..) |message, index| {
-        texts[index] = try arena.dupe(u8, messageText(message));
-    }
-    return texts;
-}

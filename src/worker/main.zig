@@ -37,7 +37,7 @@ fn serve(io: std.Io, gpa: std.mem.Allocator) !void {
         defer request.deinit();
 
         switch (request.op) {
-            .call => try handleCall(gpa, &env, &out.interface, request.arguments),
+            .call => try handleCall(gpa, &env, &out.interface, request.scheme),
             .tools => try handleTools(gpa, &env, &out.interface),
             .shutdown => {
                 try worker.writeReply(gpa, &out.interface, true, "");
@@ -48,9 +48,9 @@ fn serve(io: std.Io, gpa: std.mem.Allocator) !void {
     }
 }
 
-fn handleCall(gpa: std.mem.Allocator, env: *environment.Env, writer: *std.Io.Writer, arguments: []const u8) !void {
+fn handleCall(gpa: std.mem.Allocator, env: *environment.Env, writer: *std.Io.Writer, scheme: []const u8) !void {
     var message_buffer: [1024]u8 = undefined;
-    const value = env.call(gpa, arguments) catch |err| {
+    const value = env.call(gpa, scheme) catch |err| {
         const text: []const u8 = env.interpreter.lastError(&message_buffer) catch @errorName(err);
         try worker.writeReply(gpa, writer, false, text);
         try writer.flush();
@@ -64,21 +64,20 @@ fn handleCall(gpa: std.mem.Allocator, env: *environment.Env, writer: *std.Io.Wri
 fn handleTools(gpa: std.mem.Allocator, env: *environment.Env, writer: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
+    const alloc = arena.allocator();
 
-    const descs = env.tools(arena.allocator()) catch |err| {
+    const descs = env.tools(alloc) catch |err| {
         try worker.writeReply(gpa, writer, false, @errorName(err));
         try writer.flush();
         return;
     };
 
-    var text: std.Io.Writer.Allocating = .init(gpa);
-    defer text.deinit();
+    const tools = try alloc.alloc(worker.Tool, descs.len);
     for (descs, 0..) |desc, index| {
-        if (index > 0) try text.writer.writeAll("\n");
-        try text.writer.print("{s}\t{s}\t{s}", .{ desc.name, desc.summary, desc.when });
+        tools[index] = .{ .name = desc.name, .summary = desc.summary, .when = desc.when };
     }
 
-    try worker.writeReply(gpa, writer, true, text.written());
+    try worker.writeToolsReply(gpa, writer, tools);
     try writer.flush();
 }
 

@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
 
     try protocol.writeClientFrame(gpa, &writer.interface, .new);
     switch (try protocol.readServerFrame(arena.allocator(), &reader.interface)) {
-        .attached => |id| std.debug.print("hen: session {s}\n", .{id}),
+        .attached => |id| std.debug.print("hen: session {s}\n", .{id[0..]}),
         .failure => |failure| {
             std.debug.print("hen: {s}: {s}\n", .{ failure.code, failure.message });
             return error.StartFailed;
@@ -72,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
             switch (frame) {
                 .event => |event| {
                     if (event.text.len > 0) try screen.print("{s}\n", .{event.text});
-                    if (std.mem.eql(u8, event.kind, "turn.finished")) break;
+                    if (event.kind == .turn_finished) break;
                 },
                 .failure => |failure| {
                     try screen.print("[error {s}] {s}\n", .{ failure.code, failure.message });
