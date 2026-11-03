@@ -13,8 +13,7 @@ pub const Lifecycle = msg.Lifecycle;
 pub const Tool = msg.Tool;
 pub const Usage = msg.Usage;
 
-pub const Environment = @import("environment").Environment;
-pub const Interpreter = @import("environment").Interpreter;
+pub const Environment = @import("contract").Environment;
 
 pub const Session = @import("session.zig").Session;
 pub const Model = @import("session.zig").Model;

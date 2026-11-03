@@ -1,6 +1,6 @@
 const std = @import("std");
 const uuid = @import("uuid");
-const environment = @import("environment");
+const contract = @import("contract");
 const provider_mod = @import("provider.zig");
 const message_mod = @import("message.zig");
 
@@ -135,7 +135,7 @@ pub const Session = struct {
 
     /// The environment that runs one action per call. `null` means no tools
     /// are executable; the session then never sends a tool list either.
-    environment: ?*const environment.Environment = null,
+    environment: ?*const contract.Environment = null,
 
     /// Action rounds per user request before the session asks for a final
     /// answer. Docs phase #4: default 8, set on the session.

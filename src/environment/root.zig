@@ -173,32 +173,7 @@ fn resultSlice(output: []u8) Error![]u8 {
 ///
 /// The first cut runs the bridge synchronously on the main thread; the call
 /// stays on the thread that initialized the CHICKEN runtime.
-pub const Environment = struct {
-    impl: *anyopaque,
-
-    /// Runs one action. Returns the observation as caller-owned text. A tool
-    /// error is an observation too; only allocation failure and cancellation
-    /// propagate as errors.
-    call_fn: *const fn (
-        impl: *anyopaque,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        name: []const u8,
-        arguments: []const u8,
-    ) CallError![]u8,
-
-    pub const CallError = std.mem.Allocator.Error || std.Io.Cancelable || error{Failed};
-
-    pub fn call(
-        self: Environment,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        name: []const u8,
-        arguments: []const u8,
-    ) CallError![]u8 {
-        return self.call_fn(self.impl, io, allocator, name, arguments);
-    }
-};
+pub const Environment = @import("contract").Environment;
 
 const env = @import("env.zig");
 

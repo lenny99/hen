@@ -30,10 +30,16 @@ pub fn build(b: *std.Build) void {
         .test_step = b.step("test", "Run tests"),
     };
 
+    const contract = factory.module(.{
+        .name = "contract",
+        .root = "src/contract/root.zig",
+    });
+    const contract_import = std.Build.Module.Import{ .name = "contract", .module = contract.module };
+
     const environment = factory.pair(.{
         .name = "environment",
         .root = "src/environment/root.zig",
-        .imports = &.{chicken_c_import},
+        .imports = &.{chicken_c_import, contract_import},
         .link_libc = true,
         .link_chicken = true,
         .test_root = "tests/environment/root.zig",
@@ -76,7 +82,7 @@ pub fn build(b: *std.Build) void {
     const instance = factory.module(.{
         .name = "instance",
         .root = "src/instance/root.zig",
-        .imports = &.{ uuid_import, environment_import, generations_import },
+        .imports = &.{ uuid_import, contract_import },
     });
     const instance_import = std.Build.Module.Import{ .name = instance.name, .module = instance.module };
     factory.unitTests(instance.module, null);
@@ -102,6 +108,20 @@ pub fn build(b: *std.Build) void {
         .root = "tests/socket/codec.zig",
         .name = "socket-codec-tests",
     });
+    factory.testModule(socket, .{
+        .root = "tests/socket/protocol.zig",
+        .name = "socket-protocol-tests",
+    });
+    const worker_proto = factory.module(.{
+        .name = "worker_proto",
+        .root = "src/worker/root.zig",
+        .imports = &.{.{ .name = "socket", .module = socket.module }},
+    });
+    factory.testModule(worker_proto, .{
+        .root = "tests/worker/root.zig",
+        .name = "worker-protocol-tests",
+        .extra_imports = &.{.{ .name = "socket", .module = socket.module }},
+    });
 
     factory.testModule(instance, .{
         .root = "tests/instance/session.zig",
@@ -120,36 +140,63 @@ pub fn build(b: *std.Build) void {
     });
     const provider_import = std.Build.Module.Import{ .name = provider.name, .module = provider.module };
 
-    const exe = b.addExecutable(.{
+    const hen = b.addExecutable(.{
         .name = "hen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                instance_import,
-                http_import,
-                provider_import,
-                environment_import,
-                generations_import,
-                uuid_import,
+                .{ .name = "socket", .module = socket.module },
             },
         }),
     });
+    b.installArtifact(hen);
+    hen.step.dependOn(chicken_build.step);
 
-    b.installArtifact(exe);
-    exe.step.dependOn(chicken_build.step);
+    const hend = b.addExecutable(.{
+        .name = "hend",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hend/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                instance_import,
+                http_import,
+                provider_import,
+                uuid_import,
+                .{ .name = "socket", .module = socket.module },
+                .{ .name = "worker_proto", .module = worker_proto.module },
+            },
+        }),
+    });
+    b.installArtifact(hend);
+
+    const worker = b.addExecutable(.{
+        .name = "hen-worker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/worker/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                environment_import,
+                generations_import,
+                uuid_import,
+                .{ .name = "socket", .module = socket.module },
+                .{ .name = "worker_proto", .module = worker_proto.module },
+            },
+        }),
+    });
+    b.installArtifact(worker);
+    worker.step.dependOn(chicken_build.step);
 
     const run_step = b.step("run", "Run the app");
-
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(hen);
     run_step.dependOn(&run_cmd.step);
-
     run_cmd.step.dependOn(b.getInstallStep());
-
     run_cmd.addPassthruArgs();
 
-    factory.unitTests(exe.root_module, null);
+    factory.unitTests(hen.root_module, null);
 }
 
 fn rootPath(b: *std.Build, sub_path: []const u8) []const u8 {
