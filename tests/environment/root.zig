@@ -6,7 +6,7 @@ const allocator = std.testing.allocator;
 
 const Interpreter = environment.Interpreter;
 
-test "evaluate Scheme through the Chicken interpreter" {
+test "evaluate Scheme through the Elz interpreter" {
     const interpreter = try Interpreter.init(.{});
     var output: [128]u8 = undefined;
 
@@ -14,7 +14,7 @@ test "evaluate Scheme through the Chicken interpreter" {
     try std.testing.expectEqualStrings("(1 2 3)", try interpreter.eval(allocator, "'(1 2 3)", &output));
 }
 
-test "report CHICKEN errors through Zig" {
+test "report Elz errors through Zig" {
     const interpreter = try Interpreter.init(.{});
     var output: [64]u8 = undefined;
     try std.testing.expectError(

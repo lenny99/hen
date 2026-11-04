@@ -1,30 +1,23 @@
-//! A small, Zig-only interface to the vendored CHICKEN interpreter.
+//! A small, Zig-only interface to the vendored Elz interpreter.
 //!
-//! `Interpreter` owns no resources. CHICKEN is a process-global runtime, so the
-//! first value returned by `init` binds the runtime to the calling thread. All
-//! operations must happen on that thread. CHICKEN has no matching shutdown
-//! operation, so there is intentionally no `deinit` method.
+//! Each `Interpreter` owns one Elz engine. The engine is not thread-safe, so
+//! every call must stay on the thread that ran `init`.
 
 const std = @import("std");
-const c = @import("chicken");
+const elz = @import("elz");
 
-const output_too_small_message = "Error: not enough room for result string";
-
-var runtime_mutex: std.atomic.Mutex = .unlocked;
-var runtime_owner: ?std.Thread.Id = null;
-var default_toplevel_started = false;
-
-/// Configuration passed to the CHICKEN initialize function.
+/// Configuration passed to the interpreter.
 ///
-/// A value of zero asks CHICKEN to select its default. Sizes are in bytes,
-/// except `symbol_table_size`, which is CHICKEN's symbol-table size argument.
+/// `heap_bytes` is the managed heap limit. A value of zero selects Elz's
+/// default. `stack_bytes` and `symbol_table_size` are kept for source
+/// compatibility with the previous runtime and are ignored.
 pub const InitOptions = struct {
     heap_bytes: usize = 0,
     stack_bytes: usize = 0,
     symbol_table_size: usize = 0,
 };
 
-/// Errors returned by the safe wrapper around CHICKEN's C API.
+/// Errors returned by the safe wrapper around the Elz API.
 pub const Error = std.mem.Allocator.Error || error{
     InitializationFailed,
     InvalidCString,
@@ -34,111 +27,106 @@ pub const Error = std.mem.Allocator.Error || error{
     WrongThread,
 };
 
-/// A handle to CHICKEN's process-global interpreter.
+const default_heap_bytes = 64 * 1024 * 1024;
+
+/// A handle to one Elz interpreter.
 ///
-/// The handle is cheap to copy. Copies remain bound to the thread that first
-/// initialized CHICKEN and refer to the same runtime.
+/// The handle is cheap to copy and refers to the same engine. All copies stay
+/// bound to the thread that first initialized the engine.
 pub const Interpreter = struct {
+    state: *elz.Interpreter,
     owner_thread: std.Thread.Id,
 
-    /// Initialize CHICKEN, or attach to an already initialized runtime.
-    ///
-    /// CHICKEN initialization and all later calls must remain on the same
-    /// native thread. The default library toplevel is started once, making the
-    /// runtime ready for `eval` and `load` calls.
+    /// Initialize an Elz engine.
     pub fn init(options: InitOptions) Error!Interpreter {
-        const thread_id = std.Thread.getCurrentId();
+        const backing = std.heap.page_allocator;
+        const state = try backing.create(elz.Interpreter);
+        errdefer backing.destroy(state);
 
-        while (!runtime_mutex.tryLock()) std.atomic.spinLoopHint();
-        defer runtime_mutex.unlock();
+        state.* = elz.Interpreter.init(.{
+            .heap_limit_bytes = if (options.heap_bytes == 0) default_heap_bytes else options.heap_bytes,
+        }) catch return error.InitializationFailed;
 
-        if (runtime_owner) |owner| {
-            if (owner != thread_id) return error.WrongThread;
-        } else {
-            const heap = try toCInt(options.heap_bytes);
-            const stack = try toCInt(options.stack_bytes);
-            const symbols = try toCInt(options.symbol_table_size);
-
-            if (c.CHICKEN_initialize(heap, stack, symbols, c.CHICKEN_default_toplevel) == 0) {
-                return error.InitializationFailed;
-            }
-
-            runtime_owner = thread_id;
-        }
-
-        if (!default_toplevel_started) {
-            _ = c.CHICKEN_run(null);
-            default_toplevel_started = true;
-        }
-
-        return .{ .owner_thread = thread_id };
+        return .{ .state = state, .owner_thread = std.Thread.getCurrentId() };
     }
 
-    /// Evaluate one Scheme expression and return its written representation.
+    /// Release the engine. Call this once, on the owning thread.
+    pub fn deinit(self: *Interpreter) void {
+        self.checkThread() catch return;
+        self.state.deinit();
+        std.heap.page_allocator.destroy(self.state);
+        self.* = undefined;
+    }
+
+    /// Evaluate one or more expressions and write the last value into
+    /// caller-owned storage.
     ///
-    /// `output` is caller-owned storage. The returned slice points into it.
-    /// CHICKEN evaluates the expression before discovering whether its written
-    /// representation fits, so a successful call must never be retried merely
-    /// to grow the buffer. `error.OutputBufferTooSmall` lets callers choose a
-    /// larger buffer before evaluating the expression again.
+    /// `output` must not be empty: the side effects of the evaluation happen
+    /// before the result is written, so callers get a chance to provide a
+    /// larger buffer instead of silently losing the result.
     pub fn eval(
         self: Interpreter,
         allocator: std.mem.Allocator,
         source: []const u8,
         output: []u8,
     ) Error![]u8 {
+        _ = allocator;
         try self.checkThread();
         if (output.len == 0) return error.OutputBufferTooSmall;
         if (std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidCString;
-        _ = try toCInt(source.len);
 
-        const source_z = try allocator.dupeSentinel(u8, source, 0);
-        defer allocator.free(source_z);
+        var fuel: u64 = std.math.maxInt(u64);
+        const value = self.state.evalString(source, &fuel) catch return error.SchemeError;
 
-        const output_len = try toCInt(output.len);
-        if (c.CHICKEN_eval_string_to_string(source_z.ptr, output.ptr, output_len) != 0) {
-            return resultSlice(output);
-        }
-
-        return self.mapEvaluationError();
+        var writer = std.Io.Writer.fixed(output);
+        elz.write(value, &writer) catch return error.OutputBufferTooSmall;
+        return output[0..writer.end];
     }
 
-    /// Load a Scheme source or compiled file.
+    /// Load a Scheme source file.
     pub fn load(self: Interpreter, allocator: std.mem.Allocator, path: []const u8) Error!void {
         try self.checkThread();
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidCString;
-        _ = try toCInt(path.len);
 
-        const path_z = try allocator.dupeSentinel(u8, path, 0);
-        defer allocator.free(path_z);
+        const source = std.Io.Dir.cwd().readFileAlloc(
+            self.state.io,
+            path,
+            allocator,
+            .limited(64 * 1024 * 1024),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.SchemeError,
+        };
+        defer allocator.free(source);
 
-        if (c.CHICKEN_load(path_z.ptr) != 0) return;
-        return error.SchemeError;
+        var fuel: u64 = std.math.maxInt(u64);
+        _ = self.state.evalString(source, &fuel) catch return error.SchemeError;
     }
 
-    /// Copy CHICKEN's most recent error message into caller-owned storage.
+    /// Copy the most recent error message into caller-owned storage.
     pub fn lastError(self: Interpreter, output: []u8) Error![]u8 {
         try self.checkThread();
         if (output.len == 0) return error.OutputBufferTooSmall;
 
-        const output_len = try toCInt(output.len);
-        c.CHICKEN_get_error_message(output.ptr, output_len);
-        return resultSlice(output);
+        const message = self.state.last_error.message orelse return output[0..0];
+        const length = @min(message.len, output.len);
+        @memcpy(output[0..length], message[0..length]);
+        return output[0..length];
     }
 
-    /// Run one scheduled Scheme thread, if any.
+    /// Elz schedules no separate Scheme threads.
     pub fn yield(self: Interpreter) Error!bool {
-        self.checkThread();
-        return c.CHICKEN_yield() != 0;
+        try self.checkThread();
+        return false;
     }
 
-    /// Return whether CHICKEN currently considers its runtime to be running.
+    /// Elz has no process-global runtime state to inspect.
     pub fn isRunning(self: Interpreter) Error!bool {
         try self.checkThread();
-        return c.CHICKEN_is_running() != 0;
+        return true;
     }
 
-    /// Interrupt the running Scheme program.
+    /// Elz exposes a fuel counter rather than an asynchronous interrupt.
     pub fn interrupt(self: Interpreter) Error!void {
         try self.checkThread();
     }
@@ -146,33 +134,11 @@ pub const Interpreter = struct {
     fn checkThread(self: Interpreter) Error!void {
         if (self.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
     }
-
-    fn mapEvaluationError(self: Interpreter) Error {
-        var error_buffer: [512]u8 = undefined;
-        const message = self.lastError(&error_buffer) catch return error.SchemeError;
-        if (std.mem.eql(u8, message, output_too_small_message)) {
-            return error.OutputBufferTooSmall;
-        }
-        return error.SchemeError;
-    }
 };
-
-fn toCInt(value: usize) Error!c_int {
-    if (value > std.math.maxInt(c_int)) return error.StringTooLarge;
-    return @intCast(value);
-}
-
-fn resultSlice(output: []u8) Error![]u8 {
-    const end = std.mem.indexOfScalar(u8, output, 0) orelse return error.SchemeError;
-    return output[0..end];
-}
 
 /// One synchronous call into an environment: Zig sends one action (the
 /// adapter passes `arguments` as the model's Scheme source and ignores
 /// `name`) and reads back one observation.
-///
-/// The first cut runs the bridge synchronously on the main thread; the call
-/// stays on the thread that initialized the CHICKEN runtime.
 pub const Environment = @import("contract").Environment;
 
 const env = @import("env.zig");
