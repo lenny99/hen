@@ -41,31 +41,13 @@ The split has two programs. =hen= is the client and the command line. =hend=
 is the supervisor, and one instance runs per machine.
 
 =hend= owns one thread per session. The thread holds the transcript, runs the
-turn, and serves the client connection. Scheme evaluation runs in a child
-process, one child per session. Each child owns one CHICKEN runtime, because
-CHICKEN is process-global and bound to the thread that initializes it
-(=src/environment/root.zig=). A child crash or a hung =(load ...)= costs one
-session, not every session.
+turn, and serves the client connection. Scheme evaluation runs on that thread:
+the session owns its Elz interpreter directly (=src/environment/root.zig=).
+Interpreters are independent, so a hung =(load ...)= or an interpreter fault
+costs one session, not every session.
 
-=hen= links no CHICKEN. =hend= links no CHICKEN either. Only the child links
-it.
-
-** Worker link
-:PROPERTIES:
-:ISSUE-ID: hen-m15.4
-:END:
-The session thread talks to its child over the child's standard streams.
-
-- stdin carries requests.
-- stdout carries replies.
-- stderr carries progress frames.
-
-=scheme/env.scm= saves the original error port at start, then redirects
-=(current-error-port)=, so CHICKEN diagnostics never interleave with progress
-frames.
-
-Both links carry MessagePack frames. The client link is the unix socket. The
-worker link is the process streams. A change to one never touches the other.
+Both =hen= and =hend= link Elz. There is no worker child and no worker
+process boundary.
 
 ** Session state and lifetime
 :PROPERTIES:
@@ -189,15 +171,5 @@ for now.
 
 =hen= with no arguments starts =hend= when it is not running, then starts a
 session. =hen ls= lists sessions. =hen attach <id>= attaches.
-
-** Gate and generations
-:PROPERTIES:
-:ISSUE-ID: hen-m15.12
-:END:
-The gate is a deterministic step inside rollback and inside generation
-creation. It is not a tool. Rollback and generation creation as tools are
-deferred.
-
-*** Deferred
 
 

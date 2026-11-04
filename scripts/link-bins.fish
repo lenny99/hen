@@ -6,7 +6,7 @@ set -l link_dir $HOME/.local/bin
 
 mkdir -p $link_dir
 
-for name in hen hend hen-worker
+for name in hen hend
     set -l source $build_dir/$name
     if not test -x $source
         echo "missing executable: $source" >&2

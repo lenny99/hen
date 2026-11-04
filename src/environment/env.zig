@@ -5,178 +5,21 @@ const root = @import("root.zig");
 const Interpreter = root.Interpreter;
 pub const Error = root.Error;
 
-/// One registered tool listed by `hen:tools/list`.
-pub const ToolDesc = struct {
-    name: []const u8,
-    summary: []const u8,
-    when: []const u8,
-    description: []const u8,
-};
-
-/// The bridge version the registry implements. A generation whose manifest
-/// declares a different api cannot load.
-pub const bridge_api_version = "1";
-
-pub const ModuleName = struct {
-    text: []const u8,
-
-    pub fn init(text: []const u8) ModuleName {
-        return .{ .text = text };
-    }
-};
-
-pub const ModulePath = struct {
-    text: []const u8,
-
-    pub fn init(text: []const u8) ModulePath {
-        return .{ .text = text };
-    }
-};
-
-pub const ConfigSourceVar = struct {
-    text: []const u8,
-
-    pub fn init(text: []const u8) ConfigSourceVar {
-        return .{ .text = text };
-    }
-};
-
-pub const ConfigLiteral = struct {
-    text: []const u8,
-
-    pub fn init(text: []const u8) ConfigLiteral {
-        return .{ .text = text };
-    }
-};
-
-/// One plugin module to load into the environment: its registry name and
-/// the absolute path of its source file.
-pub const ModuleEntry = struct {
-    name: ModuleName,
-    path: ModulePath,
-};
-
-/// One host-resolved configuration value, handed to the runtime before any
-/// module loads: `hen:config/set!` pairs the source variable with the value.
-pub const ConfigValue = struct {
-    source_var: ConfigSourceVar,
-    value: ConfigLiteral,
-};
-
-/// The module wrapper the interpreter evaluates per generation module:
-/// imports first, `register-module!` inside the module body so the source
-/// publishes under its own name, and `(and #t)` for a tiny written result.
-fn formatWrapper(allocator: std.mem.Allocator, entry: ModuleEntry) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    const head = try std.fmt.allocPrint(
-        allocator,
-        "(module {s} * (import scheme (chicken base) (chicken condition) (chicken port) hen-plugin) (register-module! '{s}) (include ",
-        .{ entry.name.text, entry.name.text },
-    );
-    defer allocator.free(head);
-    try out.appendSlice(allocator, head);
-    try writeSchemeString(allocator, &out, entry.path.text);
-    try out.appendSlice(allocator, ") (and #t))");
-    return out.toOwnedSlice(allocator);
-}
-
-/// `(begin ... #t)` keeps the written result tiny: `hen:config/set!` itself
-/// returns the whole new config table.
-fn formatConfigSet(allocator: std.mem.Allocator, config: ConfigValue) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "(begin (hen:config/set! ");
-    try writeSchemeString(allocator, &out, config.source_var.text);
-    try out.appendSlice(allocator, " ");
-    try writeSchemeString(allocator, &out, config.value.text);
-    try out.appendSlice(allocator, ") #t)");
-    return out.toOwnedSlice(allocator);
-}
-
-/// The synchronous bridge between Zig and the CHICKEN runtime.
+/// The synchronous bridge between Zig and the Elz interpreter.
 ///
-/// One `Env` owns one interpreter handle. Every call must stay on the thread
-/// that ran `init`; CHICKEN enforces that with `error.WrongThread`. There is
-/// no shutdown: the runtime lives until the process exits.
+/// One `Env` owns one interpreter. Every call must stay on the thread that ran
+/// `init`; the interpreter enforces that with `error.WrongThread`.
 pub const Env = struct {
     interpreter: Interpreter,
 
-    /// Start the runtime and load `modules` in order. The registry
-    /// `scheme/env.scm` is the caller's first entry. A failed load propagates
-    /// as an error, it is not an observation.
-    pub fn init(allocator: std.mem.Allocator, modules: []const []const u8) Error!Env {
-        const interpreter = try Interpreter.init(.{});
-        for (modules) |module| try interpreter.load(allocator, module);
-        return .{ .interpreter = interpreter };
+    /// Start an empty runtime. The caller loads sources through the
+    /// interpreter when it needs them.
+    pub fn init() Error!Env {
+        return .{ .interpreter = try Interpreter.init(.{}) };
     }
 
-    /// Start the runtime on a generation: the host registry loads first, then
-    /// every configuration value is set, then each module entry loads through
-    /// its module wrapper in the given order. Wrapper internals stay on the
-    /// plugin side of the module wall; a failed load or config set propagates
-    /// as an error.
-    pub fn initGeneration(
-        allocator: std.mem.Allocator,
-        entries: []const ModuleEntry,
-        configs: []const ConfigValue,
-    ) Error!Env {
-        var env = try Env.init(allocator, &.{"scheme/env.scm"});
-        try env.loadGeneration(allocator, entries, configs);
-        return env;
-    }
-
-    pub fn loadGeneration(
-        self: *Env,
-        allocator: std.mem.Allocator,
-        entries: []const ModuleEntry,
-        configs: []const ConfigValue,
-    ) Error!void {
-        const interpreter = self.interpreter;
-
-        for (configs) |config| {
-            const source = try formatConfigSet(allocator, config);
-            defer allocator.free(source);
-            var output: [64]u8 = undefined;
-            _ = try interpreter.eval(allocator, source, &output);
-        }
-
-        for (entries) |entry| {
-            const wrapper = try formatWrapper(allocator, entry);
-            defer allocator.free(wrapper);
-            var output: [64]u8 = undefined;
-            _ = try interpreter.eval(allocator, wrapper, &output);
-        }
-    }
-
-    /// List the registered tools as provider-ready descriptors.
-    ///
-    /// The result and its strings are owned by `allocator`; freeing the
-    /// whole list at once is easiest with an arena.
-    pub fn tools(self: *Env, allocator: std.mem.Allocator) Error![]ToolDesc {
-        const listing = try evalRead(self.interpreter, allocator, "(hen:tools/list)");
-        defer allocator.free(listing);
-
-        const datum = try parseDatum(allocator, listing);
-        defer freeDatum(allocator, datum);
-
-        const entries = switch (datum) {
-            .list => |items| items,
-            else => return error.SchemeError,
-        };
-
-        var descs: std.ArrayList(ToolDesc) = .empty;
-        errdefer {
-            for (descs.items) |desc| freeDesc(allocator, desc);
-            descs.deinit(allocator);
-        }
-
-        for (entries) |entry| {
-            const desc = try descFromEntry(allocator, entry);
-            errdefer freeDesc(allocator, desc);
-            try descs.append(allocator, desc);
-        }
-        return descs.toOwnedSlice(allocator);
+    pub fn deinit(self: *Env) void {
+        self.interpreter.deinit();
     }
 
     /// Run one action and return its observation as caller-owned text.
@@ -258,63 +101,6 @@ pub const Env = struct {
     }
 };
 
-const eval_read_start = 4096;
-const eval_read_max = 1024 * 1024;
-
-/// Evaluate a pure read, growing the buffer and re-evaluating until the
-/// written representation fits, starting at 4 KiB and failing beyond 1 MiB.
-fn evalRead(interpreter: Interpreter, allocator: std.mem.Allocator, source: []const u8) Error![]u8 {
-    var capacity: usize = eval_read_start;
-    while (true) {
-        const buffer = try allocator.alloc(u8, capacity);
-        const result = interpreter.eval(allocator, source, buffer) catch |err| switch (err) {
-            error.OutputBufferTooSmall => {
-                allocator.free(buffer);
-                if (capacity * 2 > eval_read_max) return error.OutputBufferTooSmall;
-                capacity *= 2;
-                continue;
-            },
-            else => {
-                allocator.free(buffer);
-                return err;
-            },
-        };
-        defer allocator.free(buffer);
-        return allocator.dupe(u8, result);
-    }
-}
-
-fn descFromEntry(allocator: std.mem.Allocator, entry: Datum) Error!ToolDesc {
-    const fields = switch (entry) {
-        .list => |items| items,
-        else => return error.SchemeError,
-    };
-    if (fields.len != 5) return error.SchemeError;
-    const name = try textOf(allocator, fields[0]);
-    errdefer allocator.free(name);
-    const summary = try textOf(allocator, fields[1]);
-    errdefer allocator.free(summary);
-    const when = try textOf(allocator, fields[2]);
-    errdefer allocator.free(when);
-    const description = try textOf(allocator, fields[3]);
-    errdefer allocator.free(description);
-    return .{ .name = name, .summary = summary, .when = when, .description = description };
-}
-
-fn textOf(allocator: std.mem.Allocator, datum: Datum) Error![]const u8 {
-    return switch (datum) {
-        .string => |text| try allocator.dupe(u8, text),
-        else => error.SchemeError,
-    };
-}
-
-fn freeDesc(allocator: std.mem.Allocator, desc: ToolDesc) void {
-    allocator.free(desc.name);
-    allocator.free(desc.summary);
-    allocator.free(desc.when);
-    allocator.free(desc.description);
-}
-
 const max_depth = 64;
 
 /// One parsed element of a written representation.
@@ -327,15 +113,7 @@ pub const Datum = union(enum) {
     list: []const Datum,
 };
 
-pub fn parseDatum(allocator: std.mem.Allocator, text: []const u8) Error!Datum {
-    var parser = Parser{ .allocator = allocator, .text = text };
-    const datum = try parser.parseValue(0);
-    parser.skipSpace();
-    if (parser.pos != parser.text.len) return error.SchemeError;
-    return datum;
-}
-
-/// Reads the written representation CHICKEN produces: lists, strings with the
+/// Reads the written representation the interpreter produces: lists, strings with the
 /// writer's escape set, symbols plain or `|...|`-quoted, numbers, and
 /// `#t`/`#f`. Anything else fails closed with `error.SchemeError`.
 const Parser = struct {

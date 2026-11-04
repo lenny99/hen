@@ -46,25 +46,6 @@ pub fn build(b: *std.Build) void {
     const uuid_import = std.Build.Module.Import{ .name = "uuid", .module = uuid.module("uuid") };
     const environment_import = std.Build.Module.Import{ .name = environment.name, .module = environment.module };
 
-    const generations = factory.pair(.{
-        .name = "generations",
-        .root = "src/generations/root.zig",
-        .optimize = true,
-        .imports = &.{ environment_import, uuid_import },
-        .test_root = "tests/generations/root.zig",
-        .test_name = "generation-data-tests",
-        .test_extra_imports = &.{environment_import},
-        .test_link_libc = true,
-    });
-    const generations_import = std.Build.Module.Import{ .name = generations.name, .module = generations.module };
-    factory.testModule(generations, .{
-        .root = "tests/generations/load.zig",
-        .name = "generation-load-tests",
-        .extra_imports = &.{environment_import},
-        .link_libc = true,
-    });
-    factory.unitTests(generations.module, "generation-tests");
-
     const instance = factory.module(.{
         .name = "instance",
         .root = "src/instance/root.zig",
@@ -98,17 +79,6 @@ pub fn build(b: *std.Build) void {
         .root = "tests/socket/protocol.zig",
         .name = "socket-protocol-tests",
     });
-    const worker_proto = factory.module(.{
-        .name = "worker_proto",
-        .root = "src/worker/root.zig",
-        .imports = &.{.{ .name = "socket", .module = socket.module }},
-    });
-    factory.testModule(worker_proto, .{
-        .root = "tests/worker/root.zig",
-        .name = "worker-protocol-tests",
-        .extra_imports = &.{.{ .name = "socket", .module = socket.module }},
-    });
-
     factory.testModule(instance, .{
         .root = "tests/instance/session.zig",
         .name = "instance-session-tests",
@@ -147,32 +117,15 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 instance_import,
+                environment_import,
                 http_import,
                 provider_import,
                 uuid_import,
                 .{ .name = "socket", .module = socket.module },
-                .{ .name = "worker_proto", .module = worker_proto.module },
             },
         }),
     });
     b.installArtifact(hend);
-
-    const worker = b.addExecutable(.{
-        .name = "hen-worker",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/worker/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                environment_import,
-                generations_import,
-                uuid_import,
-                .{ .name = "socket", .module = socket.module },
-                .{ .name = "worker_proto", .module = worker_proto.module },
-            },
-        }),
-    });
-    b.installArtifact(worker);
 
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(hen);

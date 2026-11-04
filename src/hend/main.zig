@@ -3,34 +3,23 @@ const socket = @import("socket");
 const instance = @import("instance");
 const http = @import("http");
 const provider = @import("provider");
-const uuid = @import("uuid");
 const worker_mod = @import("worker.zig");
 
-const protocol = socket.protocol;
+const Config = struct {
+    token: instance.Secret,
+    base_url: ?[]const u8,
+    model: ?instance.Model,
+};
+
+const Connection = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    stream: socket.Stream,
+    config: Config,
+};
 
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    const gpa = init.gpa;
-
-    var args = init.minimal.args.iterate();
-    _ = args.next();
-    if (args.next()) |command| {
-        if (std.mem.eql(u8, command, "gate")) return forwardWorker(io, gpa, "gate", &args);
-        if (std.mem.eql(u8, command, "rollback")) return forwardWorker(io, gpa, "rollback", &args);
-    }
     return serve(init);
-}
-
-fn forwardWorker(io: std.Io, gpa: std.mem.Allocator, command: []const u8, args: *std.process.Args.Iterator) !void {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, "hen-worker");
-    try argv.append(gpa, command);
-    while (args.next()) |argument| try argv.append(gpa, argument);
-
-    var child = try std.process.spawn(io, .{ .argv = argv.items });
-    const term = try std.process.Child.wait(&child, io);
-    if (!term.success()) return error.ChildFailed;
 }
 
 fn socketPaths(gpa: std.mem.Allocator, environ: *const std.process.Environ.Map) !struct { dir: []u8, path: []u8 } {
@@ -59,28 +48,12 @@ fn serve(init: std.process.Init) !void {
     };
     const token = instance.Secret{ .name = "█[PROVIDER CREDENTIAL REDACTED]█", .value = token_value };
 
-    var transport = try http.Transport.init(io, gpa);
-    defer transport.deinit();
-
-    const client = try provider.OpencodeProvider.init(gpa, &transport, &token);
-    defer client.deinit(gpa);
-
-    var endpoints: ?provider.OpenAIProvider.Endpoints = null;
-    defer if (endpoints) |e| {
-        gpa.free(e.go);
-        gpa.free(e.models);
-    };
-    if (base_url) |base| {
-        endpoints = try provider.OpenAIProvider.Endpoints.fromBase(gpa, base);
-        client.impl.endpoints = endpoints.?;
-    }
-
-    var backend = client.asProvider();
-
     var model: ?instance.Model = null;
     if (environ.get("OPENCODE_MODEL")) |name| {
         if (name.len > 0) model = .{ .provider = "█[PROVIDER CREDENTIAL REDACTED]█", .name = name, .context = 300.000 };
     }
+
+    const config = Config{ .token = token, .base_url = base_url, .model = model };
 
     if (socket.connect(io, paths.path)) |stream| {
         var existing = stream;
@@ -95,21 +68,72 @@ fn serve(init: std.process.Init) !void {
     defer listener.close(io);
 
     while (true) {
-        var stream = listener.accept(io) catch |err| switch (err) {
+        const stream = listener.accept(io) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
-        defer stream.close(io);
-        var worker: worker_mod.Worker = undefined;
-        worker.init(io) catch |err| {
-            std.debug.print("hend: worker start failed: {t}\n", .{err});
+
+        const connection = gpa.create(Connection) catch {
+            var closed = stream;
+            closed.close(io);
             continue;
         };
-        defer worker.stop(io, gpa);
+        connection.* = .{ .io = io, .gpa = gpa, .stream = stream, .config = config };
 
-        worker.serve(io, gpa, &stream, &backend, model) catch |err| {
-            std.debug.print("hend: connection ended: {t}\n", .{err});
+        const thread = std.Thread.spawn(.{}, serveConnection, .{connection}) catch |err| {
+            std.debug.print("hend: session thread failed: {t}\n", .{err});
+            var closed = connection.stream;
+            closed.close(io);
+            gpa.destroy(connection);
+            continue;
         };
+        thread.detach();
     }
 }
+
+fn serveConnection(connection: *Connection) void {
+    const io = connection.io;
+    const gpa = connection.gpa;
+    defer gpa.destroy(connection);
+    defer connection.stream.close(io);
+
+    var transport = http.Transport.init(io, gpa) catch |err| {
+        std.debug.print("hend: transport start failed: {t}\n", .{err});
+        return;
+    };
+    defer transport.deinit();
+
+    const client = provider.OpencodeProvider.init(gpa, &transport, &connection.config.token) catch |err| {
+        std.debug.print("hend: provider start failed: {t}\n", .{err});
+        return;
+    };
+    defer client.deinit(gpa);
+
+    var endpoints: ?provider.OpenAIProvider.Endpoints = null;
+    defer if (endpoints) |value| {
+        gpa.free(value.go);
+        gpa.free(value.models);
+    };
+    if (connection.config.base_url) |base| {
+        endpoints = provider.OpenAIProvider.Endpoints.fromBase(gpa, base) catch |err| {
+            std.debug.print("hend: endpoint setup failed: {t}\n", .{err});
+            return;
+        };
+        client.impl.endpoints = endpoints.?;
+    }
+
+    var backend = client.asProvider();
+
+    var worker: worker_mod.Worker = undefined;
+    worker.init() catch |err| {
+        std.debug.print("hend: interpreter start failed: {t}\n", .{err});
+        return;
+    };
+    defer worker.deinit();
+
+    worker.serve(io, gpa, &connection.stream, &backend, connection.config.model) catch |err| {
+        std.debug.print("hend: connection ended: {t}\n", .{err});
+    };
+}
+
 
