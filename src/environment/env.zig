@@ -1,63 +1,231 @@
 const std = @import("std");
+const elz = @import("elz");
+const contract = @import("contract");
 
-const root = @import("root.zig");
+pub const Error = std.mem.Allocator.Error || error{
+    InitializationFailed,
+    InvalidCString,
+    OutputBufferTooSmall,
+    SchemeError,
+    WrongThread,
+};
 
-const Interpreter = root.Interpreter;
-pub const Error = root.Error;
+/// Configuration passed to the interpreter. `heap_bytes` is the managed heap
+/// limit. A value of zero selects the default.
+pub const InitOptions = struct {
+    heap_bytes: usize = 0,
+};
 
-/// The synchronous bridge between Zig and the Elz interpreter.
-///
-/// One `Env` owns one interpreter. Every call must stay on the thread that ran
-/// `init`; the interpreter enforces that with `error.WrongThread`.
+const default_heap_bytes = 64 * 1024 * 1024;
+const max_observation = 64 * 1024;
+
+var load_mutex: std.Io.Mutex = .init;
+
+pub const Skill = struct {
+    name: []const u8,
+    content: []const u8,
+};
+
+pub const Foreign = *const fn (env: *elz.Environment, args: elz.core.ValueList) anyerror!elz.Value;
+
+pub const Handler = *const fn (
+    self: *Env,
+    args: []const elz.Value,
+    gc: std.mem.Allocator,
+) anyerror!elz.Value;
+
+pub const Tool = struct {
+    identifier: []const u8,
+    description: []const u8 = "",
+    usage: []const u8 = "",
+    skill: ?*const Skill = null,
+    impl: Foreign,
+
+    fn trampoline(comptime identifier: []const u8, comptime handler: Handler) Foreign {
+        return &struct {
+            fn call(elz_env: *elz.Environment, args: elz.core.ValueList) anyerror!elz.Value {
+                const bound = elz_env.get("*env*") catch return error.MissingEnv;
+                const ptr = switch (bound) {
+                    .opaque_pointer => |p| p orelse return error.MissingEnv,
+                    else => return error.MissingEnv,
+                };
+                const self: *Env = @ptrCast(@alignCast(ptr));
+                return handler(self, args.items, elz_env.allocator) catch |err| {
+                    const interp = elz.ffi.active_interp orelse return err;
+                    return interp.fail(elz.ElzError.ForeignFunctionError, "{s}: {t}", .{ identifier, err });
+                };
+            }
+        }.call;
+    }
+};
+
+fn helpHandler(self: *Env, args: []const elz.Value, gc: std.mem.Allocator) anyerror!elz.Value {
+    _ = self;
+    _ = args;
+    return elz.core.copyString(gc, "help");
+}
+
+pub const Help = Tool{
+    .identifier = "help",
+    .description = "",
+    .usage = "(help)",
+    .skill = null,
+    .impl = Tool.trampoline("help", helpHandler),
+};
+
+const DEFAULT_TOOLS: []const Tool = &.{
+    Help
+};
+
+/// One Elz engine and its host-side bridge. The engine is not thread-safe, so
+/// every call must stay on the thread that ran `init`.
 pub const Env = struct {
-    interpreter: Interpreter,
+    state: *elz.Interpreter,
+    registry: std.ArrayList(Tool),
+    owner_thread: std.Thread.Id,
 
-    /// Start an empty runtime. The caller loads sources through the
-    /// interpreter when it needs them.
-    pub fn init() Error!Env {
-        return .{ .interpreter = try Interpreter.init(.{}) };
+    /// Initialize the engine in place. The address is stable for the whole
+    /// lifetime, which is what the `*env*` host binding requires.
+    pub fn init(self: *Env, options: InitOptions) Error!void {
+        const backing = std.heap.page_allocator;
+        const state = try backing.create(elz.Interpreter);
+        state.* = elz.Interpreter.init(.{
+            .heap_limit_bytes = if (options.heap_bytes == 0) default_heap_bytes else options.heap_bytes,
+        }) catch {
+            backing.destroy(state);
+            return error.InitializationFailed;
+        };
+
+        var registry = try std.ArrayList(Tool).initCapacity(backing, DEFAULT_TOOLS.len) catch {
+            return error.InitializationFailed;
+        };
+        registry.appendSliceAssumeCapacity(DEFAULT_TOOLS);
+
+        self.* = .{ 
+            .state = state, 
+            .owner_thread = std.Thread.getCurrentId(), 
+            .registry = registry 
+        };
+        self.setGlobal("*env*", .{ .opaque_pointer = self }) catch {
+            self.state.deinit();
+            backing.destroy(self.state);
+            return error.InitializationFailed;
+        };
     }
 
+    /// Release the engine. Call this once, on the owning thread.
     pub fn deinit(self: *Env) void {
-        self.interpreter.deinit();
+        self.checkThread() catch return;
+        self.state.deinit();
+        std.heap.page_allocator.destroy(self.state);
+        self.* = undefined;
+    }
+
+    /// Evaluate one or more expressions and write the last value into
+    /// caller-owned storage.
+    ///
+    /// `output` must not be empty: the side effects of the evaluation happen
+    /// before the result is written, so callers get a chance to provide a
+    /// larger buffer instead of silently losing the result.
+    pub fn eval(self: *Env, source: []const u8, output: []u8) Error![]u8 {
+        if (output.len == 0) return error.OutputBufferTooSmall;
+        const value = try self.evalValue(source);
+
+        var writer = std.Io.Writer.fixed(output);
+        elz.write(value, &writer) catch return error.OutputBufferTooSmall;
+        return output[0..writer.end];
+    }
+
+    fn evalValue(self: *Env, source: []const u8) Error!elz.Value {
+        try self.checkThread();
+        if (std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidCString;
+
+        var fuel: u64 = std.math.maxInt(u64);
+        return self.state.evalString(source, &fuel) catch return error.SchemeError;
+    }
+
+    /// Load a Scheme source file.
+    pub fn load(self: *Env, allocator: std.mem.Allocator, path: []const u8) Error!void {
+        try self.checkThread();
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidCString;
+
+        load_mutex.lockUncancelable(self.state.io);
+        defer load_mutex.unlock(self.state.io);
+
+        const source = std.Io.Dir.cwd().readFileAlloc(
+            self.state.io,
+            path,
+            allocator,
+            .limited(64 * 1024 * 1024),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.SchemeError,
+        };
+        defer allocator.free(source);
+
+        var fuel: u64 = std.math.maxInt(u64);
+        _ = self.state.evalString(source, &fuel) catch return error.SchemeError;
+    }
+
+    /// Bind a value into the interpreter's root environment.
+    pub fn setGlobal(self: *Env, name: []const u8, value: elz.Value) Error!void {
+        try self.checkThread();
+        self.state.root_env.set(name, value) catch return error.SchemeError;
+    }
+
+    /// Copy the most recent error message into caller-owned storage.
+    pub fn lastError(self: *Env, output: []u8) Error![]u8 {
+        try self.checkThread();
+        if (output.len == 0) return error.OutputBufferTooSmall;
+
+        const message = self.state.last_error.message orelse return output[0..0];
+        const length = @min(message.len, output.len);
+        @memcpy(output[0..length], message[0..length]);
+        return output[0..length];
+    }
+
+    /// Elz schedules no separate Scheme threads.
+    pub fn yield(self: *Env) Error!bool {
+        try self.checkThread();
+        return false;
+    }
+
+    /// Elz has no process-global runtime state to inspect.
+    pub fn isRunning(self: *Env) Error!bool {
+        try self.checkThread();
+        return true;
+    }
+
+    /// Elz exposes a fuel counter rather than an asynchronous interrupt.
+    pub fn interrupt(self: *Env) Error!void {
+        try self.checkThread();
+    }
+
+    fn checkThread(self: *Env) Error!void {
+        if (self.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
     }
 
     /// Run one action and return its observation as caller-owned text.
     ///
-    /// `source` is the model's action as one string; `hen:eval!` reads
-    /// exactly one expression from it and resolves the stored observation
-    /// under its guard rails. The result comes back as the written literal
-    /// `(hen:tools/fetch)` returns and decodes to the exact bytes stored.
-    /// A tool error is an observation, as is a failed bridge eval; the
-    /// action always runs exactly once, so neither eval is ever retried.
-    /// Allocation failures and `WrongThread`-class errors propagate.
+    /// A string result crosses as its raw bytes; every other value crosses as
+    /// its written representation, capped at `max_observation`. A Scheme
+    /// error is an observation that starts with `Error: `. Allocation
+    /// failures and `WrongThread`-class errors propagate.
     pub fn call(self: *Env, allocator: std.mem.Allocator, source: []const u8) Error![]u8 {
-        const dispatch = try formatEval(allocator, source);
-        defer allocator.free(dispatch);
-
-        var length_buffer: [64]u8 = undefined;
-        const length_written = self.interpreter.eval(allocator, dispatch, &length_buffer) catch |err|
-            return errorObservation(self, allocator, err);
-        const length = std.fmt.parseInt(usize, length_written, 10) catch
-            return errorObservation(self, allocator, error.SchemeError);
-
-        const byte_slack_per_char = 6;
-        const byte_slack = 64;
-        const written_width = std.math.mul(usize, length, byte_slack_per_char) catch
-            return errorObservation(self, allocator, error.SchemeError);
-        const scratch_len = std.math.add(usize, written_width, byte_slack) catch
-            return errorObservation(self, allocator, error.SchemeError);
-
-        const scratch = try allocator.alloc(u8, scratch_len);
-        defer allocator.free(scratch);
-
-        const written = self.interpreter.eval(allocator, "(hen:tools/fetch)", scratch) catch |err|
+        const value = self.evalValue(source) catch |err|
             return errorObservation(self, allocator, err);
 
-        return decodeResult(allocator, written) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.BadEncoding => allocator.dupe(u8, "Error: bad result encoding"),
-        };
+        switch (value) {
+            .string => |text| return allocator.dupe(u8, text.bytes),
+            else => {},
+        }
+
+        const buffer = try allocator.alloc(u8, max_observation);
+        defer allocator.free(buffer);
+        var writer = std.Io.Writer.fixed(buffer);
+        elz.write(value, &writer) catch
+            return allocator.dupe(u8, "Error: result too large");
+        return allocator.dupe(u8, buffer[0..writer.end]);
     }
 
     /// The observation form of a failed bridge eval: `Error: ` with the
@@ -70,7 +238,7 @@ pub const Env = struct {
             error.SchemeError => {
                 var message_buffer: [512]u8 = undefined;
                 var message: []const u8 = "";
-                if (self.interpreter.lastError(&message_buffer)) |text| message = text else |_| {}
+                if (self.lastError(&message_buffer)) |text| message = text else |_| {}
 
                 const trimmed = std.mem.trim(u8, message, " \t\n\r\x0b\x0c");
                 const body = if (std.mem.startsWith(u8, trimmed, "Error: ")) trimmed["Error: ".len..] else trimmed;
@@ -82,7 +250,7 @@ pub const Env = struct {
         }
     }
 
-    pub fn asEnvironment(self: *Env) root.Environment {
+    pub fn asEnvironment(self: *Env) contract.Environment {
         return .{ .impl = self, .call_fn = call_fn };
     }
 
@@ -92,7 +260,7 @@ pub const Env = struct {
         allocator: std.mem.Allocator,
         _: []const u8,
         arguments: []const u8,
-    ) root.Environment.CallError![]u8 {
+    ) contract.Environment.CallError![]u8 {
         const self: *Env = @ptrCast(@alignCast(impl));
         return self.call(allocator, arguments) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -101,288 +269,33 @@ pub const Env = struct {
     }
 };
 
-const max_depth = 64;
 
-/// One parsed element of a written representation.
-pub const Datum = union(enum) {
-    symbol: []const u8,
-    string: []u8,
-    integer: i64,
-    float: f64,
-    boolean: bool,
-    list: []const Datum,
-};
+test "call crosses a string result as raw text" {
+    var env: Env = undefined;
+    try env.init(.{});
+    defer env.deinit();
 
-/// Reads the written representation the interpreter produces: lists, strings with the
-/// writer's escape set, symbols plain or `|...|`-quoted, numbers, and
-/// `#t`/`#f`. Anything else fails closed with `error.SchemeError`.
-const Parser = struct {
-    allocator: std.mem.Allocator,
-    text: []const u8,
-    pos: usize = 0,
-
-    fn skipSpace(self: *Parser) void {
-        while (self.pos < self.text.len) : (self.pos += 1) {
-            switch (self.text[self.pos]) {
-                ' ', '\t', '\n', '\r' => {},
-                else => return,
-            }
-        }
-    }
-
-    fn parseValue(self: *Parser, depth: usize) Error!Datum {
-        if (depth >= max_depth) return error.SchemeError;
-        self.skipSpace();
-        if (self.pos >= self.text.len) return error.SchemeError;
-        switch (self.text[self.pos]) {
-            '(' => return self.parseList(depth),
-            '"' => return .{ .string = try self.parseString() },
-            '|' => return .{ .symbol = try self.parsePipeSymbol() },
-            ')', '\'', '\\' => return error.SchemeError,
-            else => return self.parseAtom(),
-        }
-    }
-
-    fn parseList(self: *Parser, depth: usize) Error!Datum {
-        self.pos += 1;
-        var items: std.ArrayList(Datum) = .empty;
-        errdefer {
-            for (items.items) |item| freeDatum(self.allocator, item);
-            items.deinit(self.allocator);
-        }
-        while (true) {
-            self.skipSpace();
-            if (self.pos >= self.text.len) return error.SchemeError;
-            if (self.text[self.pos] == ')') {
-                self.pos += 1;
-                break;
-            }
-            const item = try self.parseValue(depth + 1);
-            errdefer freeDatum(self.allocator, item);
-            try items.append(self.allocator, item);
-        }
-        return .{ .list = try items.toOwnedSlice(self.allocator) };
-    }
-
-    fn parseString(self: *Parser) Error![]u8 {
-        self.pos += 1;
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.allocator);
-        while (true) {
-            if (self.pos >= self.text.len) return error.SchemeError;
-            const ch = self.text[self.pos];
-            self.pos += 1;
-            if (ch == '"') break;
-            if (ch == '\\') {
-                try self.parseEscape(&out);
-            } else {
-                try out.append(self.allocator, ch);
-            }
-        }
-        return out.toOwnedSlice(self.allocator);
-    }
-
-    fn parsePipeSymbol(self: *Parser) Error![]const u8 {
-        self.pos += 1;
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.allocator);
-        while (true) {
-            if (self.pos >= self.text.len) return error.SchemeError;
-            const ch = self.text[self.pos];
-            self.pos += 1;
-            if (ch == '|') break;
-            if (ch == '\\') {
-                if (self.pos >= self.text.len) return error.SchemeError;
-                const escaped = self.text[self.pos];
-                self.pos += 1;
-                switch (escaped) {
-                    '|', '\\' => try out.append(self.allocator, escaped),
-                    'x' => try self.parseHexEscape(&out),
-                    else => return error.SchemeError,
-                }
-            } else {
-                if (ch == 0) return error.SchemeError;
-                try out.append(self.allocator, ch);
-            }
-        }
-        return out.toOwnedSlice(self.allocator);
-    }
-
-    fn parseEscape(self: *Parser, out: *std.ArrayList(u8)) Error!void {
-        if (self.pos >= self.text.len) return error.SchemeError;
-        const ch = self.text[self.pos];
-        self.pos += 1;
-        switch (ch) {
-            '"' => try out.append(self.allocator, '"'),
-            '\\' => try out.append(self.allocator, '\\'),
-            'a' => try out.append(self.allocator, 0x07),
-            'b' => try out.append(self.allocator, 0x08),
-            't' => try out.append(self.allocator, '\t'),
-            'n' => try out.append(self.allocator, '\n'),
-            'v' => try out.append(self.allocator, 0x0b),
-            'f' => try out.append(self.allocator, 0x0c),
-            'r' => try out.append(self.allocator, '\r'),
-            'x' => try self.parseHexEscape(out),
-            else => return error.SchemeError,
-        }
-    }
-
-    /// Hex escape `\x…;`: one to six digits, the closing `;`, and a
-    /// codepoint the runtime reader accepts. Values above 0x7f encode as
-    /// UTF-8, matching what the runtime reader turns them into.
-    fn parseHexEscape(self: *Parser, out: *std.ArrayList(u8)) Error!void {
-        var value: u32 = 0;
-        var digits: usize = 0;
-        while (self.pos < self.text.len) : (self.pos += 1) {
-            const digit = std.fmt.charToDigit(self.text[self.pos], 16) catch break;
-            value = value * 16 + digit;
-            digits += 1;
-            if (digits > 6) return error.SchemeError;
-        }
-        if (digits == 0) return error.SchemeError;
-        if (self.pos >= self.text.len or self.text[self.pos] != ';') return error.SchemeError;
-        self.pos += 1;
-        if (value > 0x1ffff) return error.SchemeError;
-        if (value < 0x80) {
-            try out.append(self.allocator, @intCast(value));
-            return;
-        }
-        var encoded: [4]u8 = undefined;
-        const length = std.unicode.utf8Encode(@intCast(value), &encoded) catch return error.SchemeError;
-        try out.appendSlice(self.allocator, encoded[0..length]);
-    }
-
-    fn parseAtom(self: *Parser) Error!Datum {
-        const start = self.pos;
-        while (self.pos < self.text.len) : (self.pos += 1) {
-            switch (self.text[self.pos]) {
-                ' ', '\t', '\n', '\r', '(', ')', '"', '\\', '\'', '|' => break,
-                else => {},
-            }
-        }
-        const atom = self.text[start..self.pos];
-        if (atom.len == 0) return error.SchemeError;
-        if (std.mem.eql(u8, atom, ".")) return error.SchemeError;
-        if (std.mem.eql(u8, atom, "#t")) return .{ .boolean = true };
-        if (std.mem.eql(u8, atom, "#f")) return .{ .boolean = false };
-        if (atom[0] == '#') return error.SchemeError;
-        switch (atom[0]) {
-            '0'...'9', '+', '-', '.' => {
-                if (std.fmt.parseInt(i64, atom, 10)) |n| return .{ .integer = n } else |_| {}
-                if (std.fmt.parseFloat(f64, atom)) |f| return .{ .float = f } else |_| {}
-            },
-            else => {},
-        }
-        return .{ .symbol = try self.allocator.dupe(u8, atom) };
-    }
-};
-
-pub fn freeDatum(allocator: std.mem.Allocator, datum: Datum) void {
-    switch (datum) {
-        .symbol => |text| allocator.free(text),
-        .string => |text| allocator.free(text),
-        .list => |items| {
-            for (items) |item| freeDatum(allocator, item);
-            allocator.free(items);
-        },
-        else => {},
-    }
+    const result = try env.call(std.testing.allocator, "\"hello\"");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
 }
 
-/// Render one string as a quoted Scheme literal: backslash, double quote,
-/// newline, tab, and return are one-character escapes, NUL is `\x0;`, and
-/// every other byte passes through; the vendored reader reads raw bytes
-/// inside string literals (pinned in tests/environment/env.zig).
-pub fn writeSchemeString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) Error!void {
-    try out.append(allocator, '"');
-    for (text) |byte| {
-        switch (byte) {
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            0 => try out.appendSlice(allocator, "\\x0;"),
-            else => try out.append(allocator, byte),
-        }
-    }
-    try out.append(allocator, '"');
+test "call crosses other results as written text" {
+    var env: Env = undefined;
+    try env.init(.{});
+    defer env.deinit();
+
+    const result = try env.call(std.testing.allocator, "(+ 1 2)");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("3", result);
 }
 
-fn formatEval(allocator: std.mem.Allocator, source: []const u8) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "(hen:eval! ");
-    try writeSchemeString(allocator, &out, source);
-    try out.appendSlice(allocator, ")");
-    return out.toOwnedSlice(allocator);
-}
+test "call turns a scheme error into an observation" {
+    var env: Env = undefined;
+    try env.init(.{});
+    defer env.deinit();
 
-const DecodeError = std.mem.Allocator.Error || error{BadEncoding};
-
-/// Decode the top-level written string literal into the exact bytes it
-/// represents, through the same escape set the reader accepts for strings:
-/// one-character escapes, `\x…;` with one to six hex digits for a codepoint
-/// within the runtime's bound, and raw passthrough bytes. Text the reader
-/// cannot take as one full string literal is `error.BadEncoding`, which is
-/// an observation, not a Zig error.
-fn decodeResult(allocator: std.mem.Allocator, written: []const u8) DecodeError![]u8 {
-    if (written.len == 0 or written[0] != '"') return error.BadEncoding;
-
-    var parser = Parser{ .allocator = allocator, .text = written };
-    const datum = parser.parseValue(0) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.SchemeError => return error.BadEncoding,
-        else => return error.BadEncoding,
-    };
-    parser.skipSpace();
-    if (parser.pos != parser.text.len) {
-        freeDatum(allocator, datum);
-        return error.BadEncoding;
-    }
-
-    const decoded: []u8 = switch (datum) {
-        .string => |text| text,
-        else => {
-            freeDatum(allocator, datum);
-            return error.BadEncoding;
-        },
-    };
-    return decoded;
-}
-
-test "writeSchemeString escapes the escape set and lets other bytes through" {
-    const cases = [_]struct { text: []const u8, rendered: []const u8 }{
-        .{ .text = "", .rendered = "\"\"" },
-        .{ .text = "a\"b\\c\nd\r\te\tf", .rendered = "\"a\\\"b\\\\c\\nd\\r\\te\\tf\"" },
-        .{ .text = "f\x00g", .rendered = "\"f\\x0;g\"" },
-        .{ .text = "a\x01b\x0bc\x0cd\x0efg\x7fhéllo", .rendered = "\"a\x01b\x0bc\x0cd\x0efg\x7fhéllo\"" },
-    };
-    for (cases) |case| {
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(std.testing.allocator);
-        try writeSchemeString(std.testing.allocator, &out, case.text);
-        try std.testing.expectEqualStrings(case.rendered, out.items);
-    }
-}
-
-test "decodeResult unescapes the written literal exactly" {
-    const decoded = try decodeResult(
-        std.testing.allocator,
-        "\"a\\\"b\\\\c\\nd\\r\\te\\tf\\x00; g\\x00;h\"",
-    );
-    defer std.testing.allocator.free(decoded);
-    try std.testing.expectEqualStrings("a\"b\\c\nd\r\te\tf\x00 g\x00h", decoded);
-}
-
-test "decodeResult rejects malformed literals" {
-    const a = std.testing.allocator;
-
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "\"abc\\x\""));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "\"abc"));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "\"a\\xZZ;\""));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "\"a\\x20000;\""));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "42"));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, "\"a\" 42"));
-    try std.testing.expectError(error.BadEncoding, decodeResult(a, ""));
+    const result = try env.call(std.testing.allocator, "(error \"boom\")");
+    defer std.testing.allocator.free(result);
+    try std.testing.expect(std.mem.startsWith(u8, result, "Error: "));
 }

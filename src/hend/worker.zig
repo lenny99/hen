@@ -11,7 +11,7 @@ pub const Worker = struct {
     env: environment.Env,
 
     pub fn init(self: *Worker) !void {
-        self.env = try environment.Env.init();
+        try self.env.init(.{});
     }
 
     pub fn deinit(self: *Worker) void {
