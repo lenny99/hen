@@ -31,7 +31,7 @@ user message
   streams one turn and folds text deltas. =ToolDef= and the
   =tool_invocation= and =tool_return= delta kinds exist, but nothing
   executes tools.
-- =src/providers=: OpenAI-compatible streaming over opencode zen
+- =src/provider=: OpenAI-compatible streaming over opencode zen
   (=go/v1/chat/completions=). =Chunk= parses =delta.tool_calls=
   fragments, but the generator drops them. The request payload has no
   =tools= field.
@@ -353,7 +353,7 @@ callback can crash (=manual/Module (chicken foreign):227-232=).
 - assistant messages with tool calls (id, name, arguments),
 - tool result messages (call id, name, content).
 
-Provider payload, =src/providers=:
+Provider payload, =src/provider=:
 
 - =Create= gains =tools= and =tool_choice=.
 - The generator assembles =delta.tool_calls= fragments by =index= and
@@ -577,7 +577,7 @@ generation root is append-only, one five-field tuple per line ---
 =(evidence ...)= --- and nothing is ever deleted
 (=src/generations/ledger.zig=). Rollback repoints the =active= pointer
 by writing =.active.tmp= and renaming; =hen rollback= accepts promoted
-generations only (=src/main.zig=). =buildCandidate= / =writeCandidate=
+generations only (=src/hen/main.zig=). =buildCandidate= / =writeCandidate=
 fork a parent eagerly: the parent's sources and tests are copied, the
 named module is added or replaced, and resolved non-secret config values
 are baked as literals while a secret's env source stays on the

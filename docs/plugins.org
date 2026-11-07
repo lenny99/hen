@@ -55,7 +55,7 @@ its imports, and the =register-module!= call.
   #:when "Any file read. Paths are workspace-relative."
   #:description "Returns the whole file as text."
   #:usage "A path outside the workspace root fails. Binary text comes back as-is."
-  #:examples '("read-file \"src/main.zig\"" "read-file \"docs/x.md\" (limit 4096)")
+  #:examples '("read-file \"src/hen/main.zig\"" "read-file \"docs/x.md\" (limit 4096)")
   #:contract '(returns: text, errors: ("Error: missing argument path"),
                effects: (fs-read), idempotent: #t)
   #:shape '(type object
