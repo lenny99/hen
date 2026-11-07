@@ -44,6 +44,10 @@
             .url = "https://codeload.github.com/zigcc/zig-msgpack/tar.gz/5884caaa3fcbcd315dbe88c3033e1fc60142071a",
             .hash = "zig_msgpack-0.0.19-evvueNR-BQBqKazGShn1eDXelQwAQz60su5SfPNB9lQk",
         },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#c1861acc835e42d6874f2b15744f472398fbdfb7",
+            .hash = "vaxis-0.6.0-BWNV_GQaDQAz9DPyb2245fA-MbFe1MtOMwVQ08z9-v50",
+        },
     },
     .paths = .{
         "build.zig",

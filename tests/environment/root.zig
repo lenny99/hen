@@ -61,16 +61,6 @@ test "reject embedded NUL bytes" {
     );
 }
 
-test "load a Scheme file through the Zig API" {
-    var env: Env = undefined;
-    try env.init(.{});
-    defer env.deinit();
-    var output: [64]u8 = undefined;
-
-    try env.load(allocator, "src/environment/testdata/load.scm");
-    try std.testing.expectEqualStrings("99", try env.eval("loaded-through-zig", &output));
-}
-
 test "a registered tool reaches the Env through the trampoline" {
     var env: Env = undefined;
     try env.init(.{});

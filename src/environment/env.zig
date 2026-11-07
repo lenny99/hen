@@ -96,7 +96,7 @@ pub const Env = struct {
             return error.InitializationFailed;
         };
 
-        var registry = try std.ArrayList(Tool).initCapacity(backing, DEFAULT_TOOLS.len) catch {
+        var registry = std.ArrayList(Tool).initCapacity(backing, DEFAULT_TOOLS.len) catch {
             return error.InitializationFailed;
         };
         registry.appendSliceAssumeCapacity(DEFAULT_TOOLS);

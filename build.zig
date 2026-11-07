@@ -19,6 +19,9 @@ pub fn build(b: *std.Build) void {
     const msgpack_dep = b.dependency("zig_msgpack", .{ .target = target, .optimize = optimize });
     const msgpack_import = std.Build.Module.Import{ .name = "msgpack", .module = msgpack_dep.module("msgpack") };
 
+    const vaxis_dep = b.dependency("vaxis", .{ .target = target, .optimize = optimize });
+    const vaxis_import = std.Build.Module.Import{ .name = "vaxis", .module = vaxis_dep.module("vaxis") };
+
     const factory = ModuleFactory{
         .b = b,
         .target = target,
@@ -79,6 +82,17 @@ pub fn build(b: *std.Build) void {
         .root = "tests/socket/protocol.zig",
         .name = "socket-protocol-tests",
     });
+
+    const client = factory.module(.{
+        .name = "client",
+        .root = "src/client/root.zig",
+        .imports = &.{
+            .{ .name = "socket", .module = socket.module },
+            vaxis_import,
+        },
+    });
+    factory.unitTests(client.module, "client-unit-tests");
+
     factory.testModule(instance, .{
         .root = "tests/instance/session.zig",
         .name = "instance-session-tests",
@@ -104,6 +118,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "socket", .module = socket.module },
+                .{ .name = "client", .module = client.module },
             },
         }),
     });

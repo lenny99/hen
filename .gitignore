@@ -1,8 +1,10 @@
-.zig-cache/
-vendor-out/
+# Zig
+zig-pkg/
 zig-out/
-/generations/
-.work/
+.zig-cache/
+
+# Vendor
+vendor-out/
 
 # Agents
 .agents/
