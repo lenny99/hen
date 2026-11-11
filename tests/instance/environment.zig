@@ -1,15 +1,15 @@
-const environment = @import("environment");
+const instance = @import("instance");
 
 const std = @import("std");
 
 const allocator = std.testing.allocator;
 
-const Env = environment.Env;
+const Env = instance.Env;
 
 test "evaluate Scheme through the Elz interpreter" {
     var env: Env = undefined;
     try env.init(.{});
-    defer env.deinit();
+    defer env.deinit(allocator);
     var output: [128]u8 = undefined;
 
     try std.testing.expectEqualStrings("6", try env.eval("(+ 1 2 3)", &output));
@@ -19,7 +19,7 @@ test "evaluate Scheme through the Elz interpreter" {
 test "report Elz errors through Zig" {
     var env: Env = undefined;
     try env.init(.{});
-    defer env.deinit();
+    defer env.deinit(allocator);
     var output: [64]u8 = undefined;
     try std.testing.expectError(
         error.SchemeError,
@@ -34,7 +34,7 @@ test "report Elz errors through Zig" {
 test "reject empty output buffer before evaluating" {
     var env: Env = undefined;
     try env.init(.{});
-    defer env.deinit();
+    defer env.deinit(allocator);
     var output: [128]u8 = undefined;
     _ = try env.eval("(define zig-buffer-test 0)", &output);
 
@@ -49,7 +49,7 @@ test "reject empty output buffer before evaluating" {
 test "reject embedded NUL bytes" {
     var env: Env = undefined;
     try env.init(.{});
-    defer env.deinit();
+    defer env.deinit(allocator);
     var output: [16]u8 = undefined;
     try std.testing.expectError(
         error.InvalidCString,
@@ -57,16 +57,16 @@ test "reject embedded NUL bytes" {
     );
     try std.testing.expectError(
         error.InvalidCString,
-        env.load(allocator, "src/environment/testdata/load.scm\x00ignored"),
+        env.load(allocator, "src/instance/testdata/load.scm\x00ignored"),
     );
 }
 
 test "a registered tool reaches the Env through the trampoline" {
     var env: Env = undefined;
     try env.init(.{});
-    defer env.deinit();
+    defer env.deinit(allocator);
 
-    try env.setGlobal(environment.Help.identifier, .{ .foreign_procedure = environment.Help.impl });
+    try env.setGlobal(instance.EnvHelp.identifier, .{ .foreign_procedure = instance.EnvHelp.impl });
     var output: [64]u8 = undefined;
     try std.testing.expectEqualStrings("\"help\"", try env.eval("(help)", &output));
 }

@@ -98,6 +98,10 @@ pub const OpenAIProvider = struct {
                     .tool_calls = if (assistant.tool_calls.len > 0) try toolCallEntries(alloc, assistant.tool_calls) else null,
                 },
                 .tool => |tool_| .{ .role = openai.Role.tool, .content = tool_.content, .tool_call_id = tool_.id },
+                .evaluation => |evaluation| .{
+                    .role = openai.Role.user,
+                    .content = try instance.evaluationSexp(alloc, evaluation),
+                },
             };
         }
 

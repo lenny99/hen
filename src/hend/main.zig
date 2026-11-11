@@ -124,16 +124,7 @@ fn serveConnection(connection: *Connection) void {
 
     var backend = client.asProvider();
 
-    var worker: worker_mod.Worker = undefined;
-    worker.init() catch |err| {
-        std.debug.print("hend: interpreter start failed: {t}\n", .{err});
-        return;
-    };
-    defer worker.deinit();
-
-    worker.serve(io, gpa, &connection.stream, &backend, connection.config.model) catch |err| {
+    worker_mod.serve(io, gpa, &connection.stream, &backend, connection.config.model) catch |err| {
         std.debug.print("hend: connection ended: {t}\n", .{err});
     };
 }
-
-

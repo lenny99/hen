@@ -50,7 +50,7 @@ test "that 'x-opencode-session' get sent to endpoint" {
 
     var messages: std.ArrayList(instance.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
-    const tools: [0]instance.ToolDef = .{};
+    const tools: [0]instance.ToolSpec = .{};
 
     var stream = try opencode.asProvider().stream(.{
         .model = "opencode/glm-5.3",

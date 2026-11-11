@@ -17,21 +17,13 @@ pub fn build(b: *std.Build) void {
     const msgpack = ctx.dep("zig_msgpack", "msgpack", .{ .optimize = optimize });
     const vaxis = ctx.dep("vaxis", "vaxis", .{ .optimize = optimize });
 
-    const contract = ctx.module("contract", .{});
-
-    const environment = ctx.module("environment", .{
-        .imports = &.{ elz.import, contract.import },
-        .link_libc = true,
-    });
-    ctx.tests(environment, .{ .files = &.{"root"} });
-    ctx.sourceTests(environment, "render");
-
     const instance = ctx.module("instance", .{
-        .imports = &.{ uuid.import, contract.import },
+        .imports = &.{ uuid.import, elz.import },
+        .link_libc = true,
     });
     ctx.sourceTests(instance, "unit");
     ctx.tests(instance, .{
-        .files = &.{"session"},
+        .files = &.{ "session", "environment" },
         .extra_imports = &.{ztf.import},
     });
 
@@ -65,7 +57,6 @@ pub fn build(b: *std.Build) void {
     _ = ctx.exec("hend", .{
         .imports = &.{
             instance.import,
-            environment.import,
             http.import,
             provider.import,
             uuid.import,

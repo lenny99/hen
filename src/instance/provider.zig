@@ -1,9 +1,6 @@
 const std = @import("std");
 const uuid = @import("uuid");
-
-const msg = @import("message.zig");
-
-const Delta = msg.Delta;
+const session = @import("session.zig");
 
 pub const ModelId = []const u8;
 pub const SystemPrompt = []const u8;
@@ -14,8 +11,64 @@ pub const ToolSpec = struct {
     description: []const u8,
 };
 
-/// Backwards-compatible name for the provider tool descriptor.
-pub const ToolDef = ToolSpec;
+pub const Tool = struct {
+    pub const Status = enum { running, completed, failed, canceled };
+
+    pub const Timing = struct {
+        started_at_ms: i64 = 0,
+        duration_ms: i64 = 0,
+    };
+
+    /// One tool call as the provider assembled it from its streamed deltas.
+    pub const Invocation = struct {
+        /// The provider's id for the call. Stable across the call's deltas, and
+        /// the value a tool result is matched against.
+        id: []const u8,
+        name: []const u8,
+        /// The call arguments as the provider sent them: the model's action
+        /// text carried as the single string parameter; the session decodes
+        /// the {"source": ...} JSON envelope real models send before
+        /// evaluation.
+        arguments: []const u8,
+    };
+
+    /// One tool result to hand back to the provider.
+    pub const Output = struct {
+        /// The id of the invocation this answers.
+        id: []const u8,
+        name: []const u8 = "",
+        content: []const u8,
+        status: Status = .completed,
+        timing: Timing = .{},
+    };
+};
+
+pub const Tokens = u64;
+
+pub const Usage = struct { input: ?Tokens = null, output: ?Tokens = null, total: ?Tokens = null };
+
+pub const Lifecycle = struct {
+    pub const Status = enum { completed, incomplete, failed };
+
+    id: []const u8,
+    kind: Status,
+    model: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    @"error": ?[]const u8 = null,
+    usage: ?Usage = null,
+    output: ?Tool.Output = null,
+};
+
+pub const Delta = union(enum) {
+    delta: []const u8,
+    done: []const u8,
+    tool_invocation: Tool.Invocation,
+    tool_return: Tool.Output,
+    lifecycle: Lifecycle,
+    @"error": []const u8,
+};
+
+
 
 pub const Provider = struct {
     pub const Error = error{ConnectionError} || std.Io.Cancelable || std.mem.Allocator.Error;
@@ -25,7 +78,7 @@ pub const Provider = struct {
         system: SystemPrompt,
         /// The conversation so far. The slices are valid only for the duration
         /// of the `stream` call; a provider that keeps them must copy them.
-        messages: []const msg.Message,
+        messages: []const session.Message,
         tools: []const ToolSpec,
         session: uuid.UUID,
     };

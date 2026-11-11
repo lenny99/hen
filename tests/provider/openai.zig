@@ -185,14 +185,14 @@ test "openai parses a chat completions tool call chunk" {
 
     const chunk = try openai.parseChunkLeaky(arena.allocator(), "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"," ++
         "\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0," ++
-        "\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"hen-eval\"," ++
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"help\"," ++
         "\"arguments\":\"(+ 1 2)\"}}]},\"finish_reason\":\"tool_calls\"}]}\n");
 
     const calls = chunk.toolCalls();
     try std.testing.expectEqual(@as(usize, 1), calls.len);
     try std.testing.expectEqual(@as(?u32, 0), calls[0].index);
     try std.testing.expectEqualStrings("call_1", calls[0].id.?);
-    try std.testing.expectEqualStrings("hen-eval", calls[0].function.?.name.?);
+    try std.testing.expectEqualStrings("help", calls[0].function.?.name.?);
     try std.testing.expectEqualStrings("(+ 1 2)", calls[0].function.?.arguments.?);
     try std.testing.expectEqualStrings("tool_calls", chunk.finishReason().?);
 }
@@ -248,7 +248,7 @@ test "provider streams the reply from the wire" {
 
     var messages: std.ArrayList(instance.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
-    const tools: [0]instance.ToolDef = .{};
+    const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{
         .model = "opencode/glm-5.3",
@@ -308,7 +308,7 @@ test "the request carries the one action tool" {
 
     var messages: std.ArrayList(instance.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
-    const tools = [_]instance.ToolDef{.{ .name = "hen-eval", .description = "Run one Scheme expression." }};
+    const tools = [_]instance.ToolSpec{.{ .name = "help", .description = "Run one Scheme expression." }};
 
     var stream = try openai_provider.asProvider().stream(.{
         .model = "opencode/glm-5.3",
@@ -326,7 +326,7 @@ test "the request carries the one action tool" {
 
     const carried = create.tools orelse return error.MissingTools;
     try std.testing.expectEqual(@as(usize, 1), carried.len);
-    try std.testing.expectEqualStrings("hen-eval", carried[0].function.name);
+    try std.testing.expectEqualStrings("help", carried[0].function.name);
     try std.testing.expectEqualStrings("Run one Scheme expression.", carried[0].function.description);
 
     const parameters = carried[0].function.parameters;
@@ -377,10 +377,10 @@ test "the conversation mapping emits assistant tool calls and tool messages" {
     try messages.append(gpa, .{ .user = .{ .content = "Evaluate the sum." } });
     try messages.append(gpa, .{ .assistant = .{
         .content = "",
-        .tool_calls = &.{.{ .id = "call_1", .name = "hen-eval", .arguments = "(+ 1 2)" }},
+        .tool_calls = &.{.{ .id = "call_1", .name = "help", .arguments = "(+ 1 2)" }},
     } });
     try messages.append(gpa, .{ .tool = .{ .id = "call_1", .content = "3" } });
-    const tools: [0]instance.ToolDef = .{};
+    const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{
         .model = "opencode/glm-5.3",
@@ -406,7 +406,7 @@ test "the conversation mapping emits assistant tool calls and tool messages" {
     try std.testing.expectEqual(@as(usize, 1), calls.len);
     try std.testing.expectEqualStrings("call_1", calls[0].id);
     try std.testing.expectEqualStrings("function", calls[0].type);
-    try std.testing.expectEqualStrings("hen-eval", calls[0].function.name);
+    try std.testing.expectEqualStrings("help", calls[0].function.name);
     try std.testing.expectEqualStrings("(+ 1 2)", calls[0].function.arguments);
 
     const tool = create.messages[3];
@@ -429,9 +429,9 @@ test "the generator assembles tool call fragments by index and ends the turn as 
         "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" ++
         "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
         "\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"," ++
-        "\"function\":{\"name\":\"hen-\"}}]},\"finish_reason\":null}]}\n\n" ++
+        "\"function\":{\"name\":\"he\"}}]},\"finish_reason\":null}]}\n\n" ++
         "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
-        "\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"eval\"," ++
+        "\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"lp\"," ++
         "\"arguments\":\"(+ \"}}]},\"finish_reason\":null}]}\n\n" ++
         "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," ++
         "\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1 2)\"}}]}," ++
@@ -452,7 +452,7 @@ test "the generator assembles tool call fragments by index and ends the turn as 
 
     var messages: std.ArrayList(instance.Message) = .empty;
     try messages.append(gpa, .{ .user = .{ .content = "Evaluate the sum." } });
-    const tools: [0]instance.ToolDef = .{};
+    const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{
         .model = "opencode/glm-5.3",
@@ -467,7 +467,7 @@ test "the generator assembles tool call fragments by index and ends the turn as 
     switch (invocation) {
         .tool_invocation => |call| {
             try std.testing.expectEqualStrings("call_1", call.id);
-            try std.testing.expectEqualStrings("hen-eval", call.name);
+            try std.testing.expectEqualStrings("help", call.name);
             try std.testing.expectEqualStrings("(+ 1 2)", call.arguments);
         },
         else => return error.UnexpectedDelta,
