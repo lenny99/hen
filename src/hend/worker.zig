@@ -4,6 +4,43 @@ const socket = @import("socket");
 const protocol = socket.protocol;
 const uuid = @import("uuid");
 
+const EventWriter = struct {
+    gpa: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    seq: *u64,
+    failed: ?anyerror = null,
+
+    fn emit(ctx: *anyopaque, event: instance.Event) void {
+        const self: *EventWriter = @ptrCast(@alignCast(ctx));
+        if (self.failed != null) return;
+        self.forward(event) catch |err| {
+            self.failed = err;
+        };
+    }
+
+    fn forward(self: *EventWriter, event: instance.Event) !void {
+        switch (event.payload) {
+            .message => |part| switch (part) {
+                .delta => |text| try self.write(.message_delta, text),
+                .done => |text| try self.write(
+                    if (event.origin == .user) .user else .assistant,
+                    text,
+                ),
+            },
+            .eval => |evaluation| try self.write(.tool, evaluation.output),
+        }
+    }
+
+    fn write(self: *EventWriter, kind: protocol.EventKind, text: []const u8) !void {
+        self.seq.* += 1;
+        try protocol.writeServerFrame(self.gpa, self.writer, .{ .event = .{
+            .seq = self.seq.*,
+            .kind = kind,
+            .text = text,
+        } });
+    }
+};
+
 pub fn serve(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -78,19 +115,13 @@ pub fn serve(
                     try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "no_session", .message = "start a session first" } });
                     continue;
                 }
-                const added = session.?.turn(io, gpa, text, null) catch |err| {
+                var event_writer = EventWriter{ .gpa = gpa, .writer = &writer.interface, .seq = &seq };
+                const listener = instance.Listener{ .ctx = &event_writer, .func = EventWriter.emit };
+                session.?.turn(io, gpa, text, listener) catch |err| {
                     try protocol.writeServerFrame(gpa, &writer.interface, .{ .failure = .{ .code = "turn", .message = @errorName(err) } });
                     continue;
                 };
-                for (added) |message| {
-                    seq += 1;
-                    const kind: protocol.EventKind = switch (message) {
-                        .assistant => .assistant,
-                        .tool, .evaluation => .tool,
-                        .user => .user,
-                    };
-                    try protocol.writeServerFrame(gpa, &writer.interface, .{ .event = .{ .seq = seq, .kind = kind, .text = messageText(message) } });
-                }
+                if (event_writer.failed) |err| return err;
                 seq += 1;
                 try protocol.writeServerFrame(gpa, &writer.interface, .{ .event = .{ .seq = seq, .kind = .turn_finished, .text = "" } });
             },
@@ -98,19 +129,13 @@ pub fn serve(
     }
 }
 
-fn messageText(message: instance.Message) []const u8 {
-    return switch (message) {
-        .assistant => |value| value.content,
-        .tool => |value| value.content,
-        .user => |value| value.content,
-        .evaluation => |value| value.output,
-    };
-}
-
 fn collectMessages(arena: std.mem.Allocator, session: instance.Session) ![]const []const u8 {
     const texts = try arena.alloc([]const u8, session.messages.items.len);
     for (session.messages.items, 0..) |message, index| {
-        texts[index] = try arena.dupe(u8, messageText(message));
+        texts[index] = try arena.dupe(u8, switch (message.payload) {
+            .message => |text| text,
+            .evaluation => |evaluation| evaluation.output,
+        });
     }
     return texts;
 }

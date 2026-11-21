@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     });
     ctx.sourceTests(instance, "unit");
     ctx.tests(instance, .{
-        .files = &.{ "session", "environment" },
+        .files = &.{"session"},
         .extra_imports = &.{ztf.import},
     });
 

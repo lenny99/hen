@@ -49,7 +49,7 @@ test "that 'x-opencode-session' get sent to endpoint" {
     opencode.impl.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
     var messages: std.ArrayList(instance.Message) = .empty;
-    try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .message = "Hello Agent!" } });
     const tools: [0]instance.ToolSpec = .{};
 
     var stream = try opencode.asProvider().stream(.{

@@ -137,46 +137,22 @@ const MockProvider = struct {
 const Collector = struct {
     allocator: std.mem.Allocator,
     events: std.ArrayList(instance.Event) = .empty,
-    session: ?*instance.Session = null,
-    active_at_start: usize = 0,
-    started_id: []u8 = &.{},
-    started_name: []u8 = &.{},
-    started_source: []u8 = &.{},
-    started_at_ms: i64 = 0,
 
     fn init(allocator: std.mem.Allocator) Collector {
         return .{ .allocator = allocator };
     }
 
     fn deinit(self: *Collector) void {
-        self.allocator.free(self.started_id);
-        self.allocator.free(self.started_name);
-        self.allocator.free(self.started_source);
         self.events.deinit(self.allocator);
     }
 
-    fn sink(self: *Collector) instance.EventSink {
-        return .{ .ctx = self, .emit = emit };
+    fn listener(self: *Collector) instance.Listener {
+        return .{ .ctx = self, .func = emit };
     }
 
     fn emit(ctx: *anyopaque, event: instance.Event) void {
         const self: *Collector = @ptrCast(@alignCast(ctx));
         self.events.append(self.allocator, event) catch @panic("out of memory");
-        switch (event) {
-            .tool_started => |value| {
-                self.replacedupe(&self.started_id, value.id);
-                self.replacedupe(&self.started_name, value.name);
-                self.replacedupe(&self.started_source, value.source);
-                self.started_at_ms = value.started_at_ms;
-                if (self.session) |session| self.active_at_start = session.active_calls.items.len;
-            },
-            else => {},
-        }
-    }
-
-    fn replacedupe(self: *Collector, slot: *[]u8, text: []const u8) void {
-        self.allocator.free(slot.*);
-        slot.* = self.allocator.dupe(u8, text) catch @panic("out of memory");
     }
 };
 
@@ -230,7 +206,8 @@ test "message added to the session is present in the history" {
     try session.appendMessage(alloc, "Hello, Agent!");
 
     try expect(session.messages.items).toHaveLength(1);
-    try expect(session.messages.items[0].user.content).toEqual("Hello, Agent!");
+    try std.testing.expectEqual(instance.Origin.user, session.messages.items[0].origin);
+    try expect(session.messages.items[0].payload.message).toEqual("Hello, Agent!");
 }
 
 test "run calls the provider once per run" {
@@ -264,8 +241,8 @@ test "run hands the provider the whole history in order" {
     try f.mock.mocks.stream.toHaveBeenCalledTimes(1);
     const call = f.mock.call.?;
     try expect(call.messages).toHaveLength(2);
-    try expect(call.messages[0].user.content).toEqual("first");
-    try expect(call.messages[1].user.content).toEqual("second");
+    try expect(call.messages[0].payload.message).toEqual("first");
+    try expect(call.messages[1].payload.message).toEqual("second");
     try expect(call.tools).toHaveLength(1);
     try expect(call.tools[0].name).toEqual("eval");
 }
@@ -287,7 +264,7 @@ test "run folds the streamed deltas into one assistant message" {
     try session.run(std.testing.io, alloc, null);
 
     try expect(session.messages.items).toHaveLength(2);
-    try expect(session.messages.items[1].assistant.content).toEqual("Hi! How can I help?");
+    try expect(session.messages.items[1].payload.message).toEqual("Hi! How can I help?");
 }
 
 test "a done delta replaces the deltas before it" {
@@ -305,7 +282,7 @@ test "a done delta replaces the deltas before it" {
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc, null);
 
-    try expect(session.messages.items[1].assistant.content).toEqual("the complete answer");
+    try expect(session.messages.items[1].payload.message).toEqual("the complete answer");
 }
 
 test "a completed lifecycle still commits the message" {
@@ -335,14 +312,17 @@ test "a tool call does not become part of the assistant text" {
 
     try f.mock.returns(&.{
         .{ .delta = "let me check " },
-        .{ .tool_invocation = .{ .id = "call_1", .name = "weather", .arguments = "{}" } },
+        .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
         .{ .done = "let me check the weather." },
     });
 
     try session.appendMessage(alloc, "Hello, Agent!");
     try session.run(std.testing.io, alloc, null);
 
-    try expect(session.messages.items[1].assistant.content).toEqual("let me check the weather.");
+    try expect(session.messages.items).toHaveLength(3);
+    try expect(session.messages.items[1].payload.message).toEqual("let me check the weather.");
+    try expect(session.messages.items[2].payload.evaluation.output).toEqual("3");
+    try std.testing.expectEqual(instance.Evaluation.Status.completed, session.messages.items[2].payload.evaluation.status);
 }
 
 test "an error delta leaves the history unchanged and releases the stream" {
@@ -398,57 +378,12 @@ test "the stream is released after a completed turn" {
     try std.testing.expectEqual(@as(usize, 1), f.mock.deinits);
 }
 
-const MockEvaluator = struct {
-    calls: usize = 0,
-    last_source: ?[]u8 = null,
-    fail: bool = false,
-
-    fn eval(ctx: *anyopaque, _: std.Io, alloc: std.mem.Allocator, source: []const u8) instance.Evaluator.Error![]u8 {
-        const self: *MockEvaluator = @ptrCast(@alignCast(ctx));
-        self.calls += 1;
-        if (self.last_source) |old| alloc.free(old);
-        self.last_source = try alloc.dupe(u8, source);
-        if (self.fail) return error.Failed;
-        return try alloc.dupe(u8, "observation text");
-    }
-
-    fn deinit(self: *MockEvaluator, alloc: std.mem.Allocator) void {
-        if (self.last_source) |old| alloc.free(old);
-    }
-
-    fn evaluator(self: *MockEvaluator) instance.Evaluator {
-        return .{ .ctx = self, .eval = eval };
-    }
-};
-
-fn installBundle(
-    session: *instance.Session,
-    alloc: std.mem.Allocator,
-    bundle_name: []const u8,
-    tool_name: []const u8,
-    description: []const u8,
-    usage: []const u8,
-) !void {
-    const tools = try alloc.alloc(instance.Bundle.Tool, 1);
-    defer alloc.free(tools);
-    tools[0] = .{ .name = tool_name, .description = description, .usage = usage };
-
-    const bundles = try alloc.alloc(instance.Bundle, 1);
-    defer alloc.free(bundles);
-    bundles[0] = .{ .name = bundle_name, .description = "Test bundle.", .tools = tools };
-    try session.environment.setBundles(alloc, bundles);
-}
-
 test "the request loop runs each action round until a text-only answer" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
     try f.init(alloc);
     defer f.deinit(alloc);
     const session = &f.session;
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
 
     try f.mock.queue(alloc, &.{
         &.{
@@ -461,19 +396,12 @@ test "the request loop runs each action round until a text-only answer" {
     try session.appendMessage(alloc, "How is the weather?");
     try session.run(std.testing.io, alloc, null);
 
-    try std.testing.expectEqual(@as(usize, 1), evaluator.calls);
-    try std.testing.expectEqualStrings("(+ 1 2)", evaluator.last_source.?);
-    try std.testing.expectEqual(@as(usize, 4), session.messages.items.len);
-    const carried = session.messages.items[1].assistant;
-    try std.testing.expectEqual(@as(usize, 1), carried.tool_calls.len);
-    try std.testing.expectEqualStrings("eval", carried.tool_calls[0].name);
-    const observation = session.messages.items[2].tool;
-    try std.testing.expectEqualStrings("call_1", observation.id);
-    try std.testing.expectEqualStrings("eval", observation.name);
-    try std.testing.expectEqualStrings("observation text", observation.content);
-    try std.testing.expectEqual(instance.Tool.Status.completed, observation.status);
-    try std.testing.expect(observation.timing.started_at_ms > 0);
-    try std.testing.expectEqualStrings("All done.", session.messages.items[3].assistant.content);
+    try f.mock.mocks.stream.toHaveBeenCalledTimes(2);
+    try std.testing.expectEqual(@as(usize, 3), session.messages.items.len);
+    try std.testing.expectEqual(instance.Origin.model, session.messages.items[1].origin);
+    try std.testing.expectEqualStrings("call_1", session.messages.items[1].payload.evaluation.call.id);
+    try std.testing.expectEqualStrings("3", session.messages.items[1].payload.evaluation.output);
+    try std.testing.expectEqualStrings("All done.", session.messages.items[2].payload.message);
 }
 
 test "a failed evaluation becomes an observation" {
@@ -483,13 +411,9 @@ test "a failed evaluation becomes an observation" {
     defer f.deinit(alloc);
     const session = &f.session;
 
-    var evaluator = MockEvaluator{ .fail = true };
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
     try f.mock.queue(alloc, &.{
         &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
+            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "not scheme" } },
             .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
         },
         &.{.{ .done = "Handled." }},
@@ -498,8 +422,9 @@ test "a failed evaluation becomes an observation" {
     try session.appendMessage(alloc, "How is the weather?");
     try session.run(std.testing.io, alloc, null);
 
-    try std.testing.expectEqualStrings("Error: Failed", session.messages.items[2].tool.content);
-    try std.testing.expectEqual(instance.Tool.Status.failed, session.messages.items[2].tool.status);
+    try std.testing.expectEqual(@as(usize, 3), session.messages.items.len);
+    try std.testing.expectEqual(instance.Evaluation.Status.failed, session.messages.items[1].payload.evaluation.status);
+    try std.testing.expect(std.mem.startsWith(u8, session.messages.items[1].payload.evaluation.output, "Error: "));
 }
 
 test "the session asks for a final answer when the round budget is spent" {
@@ -510,9 +435,8 @@ test "the session asks for a final answer when the round budget is spent" {
     const session = &f.session;
     session.max_rounds = 1;
 
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
+    var collector = Collector.init(alloc);
+    defer collector.deinit();
 
     try f.mock.queue(alloc, &.{
         &.{
@@ -523,12 +447,41 @@ test "the session asks for a final answer when the round budget is spent" {
     });
 
     try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, null);
+    try session.run(std.testing.io, alloc, collector.listener());
 
-    try std.testing.expectEqual(@as(usize, 2), f.mock.calls);
+    try f.mock.mocks.stream.toHaveBeenCalledTimes(2);
     try expect(f.mock.call.?.tools).toBeEmpty();
-    try expect(session.messages.items[3].user.content).toEqual(instance.Session.final_answer_prompt);
-    try expect(session.messages.items[4].assistant.content).toEqual("final answer");
+    try std.testing.expectEqual(@as(usize, 4), session.messages.items.len);
+    try std.testing.expectEqual(instance.Origin.user, session.messages.items[2].origin);
+    try std.testing.expectEqualStrings(instance.Session.final_answer_prompt, session.messages.items[2].payload.message);
+    try std.testing.expectEqualStrings("final answer", session.messages.items[3].payload.message);
+
+    try std.testing.expectEqual(@as(usize, 3), collector.events.items.len);
+    switch (collector.events.items[0].payload) {
+        .eval => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(instance.Origin.user, collector.events.items[1].origin);
+    const user_done = switch (collector.events.items[1].payload) {
+        .message => |part| part.done,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(instance.Session.final_answer_prompt, user_done);
+    const model_done = switch (collector.events.items[2].payload) {
+        .message => |part| part.done,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("final answer", model_done);
+}
+
+fn installHelpBundle(session: *instance.Session) !void {
+    const tools = [_]instance.Bundle.Tool{
+        .{ .name = "help", .description = "Show help.", .usage = "(env.help)" },
+    };
+    const bundles = [_]instance.Bundle{
+        .{ .name = "env", .description = "Test bundle.", .tools = &tools },
+    };
+    try session.environment.setBundles(&bundles);
 }
 
 test "run hands the provider the eval tool with the catalog" {
@@ -538,10 +491,7 @@ test "run hands the provider the eval tool with the catalog" {
     defer f.deinit(alloc);
     const session = &f.session;
 
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-    try installBundle(session, alloc, "env", "help", "Show help.", "(env.help)");
+    try installHelpBundle(session);
 
     try f.mock.returns(&.{.{ .delta = "done" }});
 
@@ -555,83 +505,6 @@ test "run hands the provider the eval tool with the catalog" {
     try std.testing.expect(std.mem.indexOf(u8, call.tools[0].description, "(env.help): Show help.") != null);
 }
 
-test "the evaluator receives the decoded source" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
-    try f.mock.queue(alloc, &.{
-        &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
-            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
-        },
-        &.{.{ .done = "All done." }},
-    });
-
-    try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, null);
-
-    try std.testing.expectEqual(@as(usize, 1), evaluator.calls);
-    try std.testing.expectEqualStrings("(+ 1 2)", evaluator.last_source.?);
-    try std.testing.expectEqualStrings("observation text", session.messages.items[2].tool.content);
-}
-
-test "a raw argument reaches the evaluator unchanged" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
-    try f.mock.queue(alloc, &.{
-        &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "(+ 1 2)" } },
-            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
-        },
-        &.{.{ .done = "All done." }},
-    });
-
-    try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, null);
-
-    try std.testing.expectEqual(@as(usize, 1), evaluator.calls);
-    try std.testing.expectEqualStrings("(+ 1 2)", evaluator.last_source.?);
-    try std.testing.expectEqualStrings("observation text", session.messages.items[2].tool.content);
-}
-
-test "the assistant message keeps the raw arguments the model sent" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    try f.mock.queue(alloc, &.{
-        &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "{\"source\": \"(+ 1 2)\"}" } },
-            .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
-        },
-        &.{.{ .done = "All done." }},
-    });
-
-    try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, null);
-
-    const carried = session.messages.items[1].assistant;
-    try std.testing.expectEqual(@as(usize, 1), carried.tool_calls.len);
-    try std.testing.expectEqualStrings("{\"source\": \"(+ 1 2)\"}", carried.tool_calls[0].arguments);
-}
-
 test "setBundles with no entries leaves the eval catalog empty" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
@@ -639,12 +512,8 @@ test "setBundles with no entries leaves the eval catalog empty" {
     defer f.deinit(alloc);
     const session = &f.session;
 
-    try session.environment.setBundles(alloc, &.{});
+    try session.environment.setBundles(&.{});
     try expect(session.environment.bundles).toBeEmpty();
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
 
     try f.mock.returns(&.{.{ .delta = "done" }});
     try session.appendMessage(alloc, "Hello.");
@@ -680,7 +549,7 @@ test "setBundles adopts bundles, skills, and tools" {
     const bundles = [_]instance.Bundle{
         .{ .name = "alpha", .description = "Alpha bundle.", .skills = &skills, .tools = &tools },
     };
-    try session.environment.setBundles(alloc, &bundles);
+    try session.environment.setBundles(&bundles);
 
     try expect(session.environment.bundles).toHaveLength(1);
     try expect(session.environment.bundles[0].name).toEqual("alpha");
@@ -694,20 +563,20 @@ test "setBundles adopts bundles, skills, and tools" {
     try expect(session.environment.bundles[0].tools[0].description).toEqual("Returns the fixture value.");
     try expect(session.environment.bundles[0].tools[0].usage).toEqual("(alpha-pin)");
     try expect(session.environment.bundles[0].tools[0].skill.?).toEqual("alpha-skill");
-    try std.testing.expect(std.mem.indexOf(u8, session.environment.eval_description, "(alpha-pin): Returns the fixture value.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, session.environment.eval_description, "(alpha.beta-probe): A probe.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.environment.evalDescription(), "(alpha-pin): Returns the fixture value.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.environment.evalDescription(), "(alpha.beta-probe): A probe.") != null);
 
     const replaced = [_]instance.Bundle{
         .{ .name = "gamma", .description = "A later bundle." },
     };
-    try session.environment.setBundles(alloc, &replaced);
+    try session.environment.setBundles(&replaced);
 
     try expect(session.environment.bundles).toHaveLength(1);
     try expect(session.environment.bundles[0].name).toEqual("gamma");
     try expect(session.environment.bundles[0].tools).toBeEmpty();
 }
 
-test "turn returns the messages it added" {
+test "turn appends the user message and runs the request" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
     try f.init(alloc);
@@ -716,11 +585,11 @@ test "turn returns the messages it added" {
 
     try f.mock.returns(&.{.{ .delta = "Hi!" }});
 
-    const added = try session.turn(std.testing.io, alloc, "hello", null);
+    try session.turn(std.testing.io, alloc, "hello", null);
 
-    try expect(added).toHaveLength(1);
-    try expect(added[0].assistant.content).toEqual("Hi!");
     try expect(session.messages.items).toHaveLength(2);
+    try expect(session.messages.items[0].payload.message).toEqual("hello");
+    try expect(session.messages.items[1].payload.message).toEqual("Hi!");
 }
 
 test "run streams message deltas and a done event" {
@@ -739,40 +608,36 @@ test "run streams message deltas and a done event" {
     });
 
     try session.appendMessage(alloc, "Hello, Agent!");
-    try session.run(std.testing.io, alloc, collector.sink());
+    try session.run(std.testing.io, alloc, collector.listener());
 
     try std.testing.expectEqual(@as(usize, 3), collector.events.items.len);
-    const first = switch (collector.events.items[0]) {
-        .message_delta => |text| text,
+    try std.testing.expectEqual(instance.Origin.model, collector.events.items[0].origin);
+    const first = switch (collector.events.items[0].payload) {
+        .message => |part| part.delta,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("Hi!", first);
-    const second = switch (collector.events.items[1]) {
-        .message_delta => |text| text,
+    const second = switch (collector.events.items[1].payload) {
+        .message => |part| part.delta,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings(" there", second);
-    const done = switch (collector.events.items[2]) {
-        .message_done => |text| text,
+    const done = switch (collector.events.items[2].payload) {
+        .message => |part| part.done,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("Hi! there", done);
 }
 
-test "run reports an eval start and finish with timing" {
+test "run reports a finished eval with timing" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
     try f.init(alloc);
     defer f.deinit(alloc);
     const session = &f.session;
 
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
     var collector = Collector.init(alloc);
     defer collector.deinit();
-    collector.session = session;
 
     try f.mock.queue(alloc, &.{
         &.{
@@ -783,140 +648,43 @@ test "run reports an eval start and finish with timing" {
     });
 
     try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, collector.sink());
+    try session.run(std.testing.io, alloc, collector.listener());
 
-    try std.testing.expectEqual(@as(usize, 3), collector.events.items.len);
-    switch (collector.events.items[0]) {
-        .tool_started => {},
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqualStrings("call_1", collector.started_id);
-    try std.testing.expectEqualStrings("eval", collector.started_name);
-    try std.testing.expectEqualStrings("(+ 1 2)", collector.started_source);
-    try std.testing.expect(collector.started_at_ms > 0);
-    try std.testing.expectEqual(@as(usize, 1), collector.active_at_start);
-
-    const finished = switch (collector.events.items[1]) {
-        .tool_finished => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqualStrings("call_1", finished.id);
-    try std.testing.expectEqualStrings("observation text", finished.output);
-    try std.testing.expectEqual(instance.Tool.Status.completed, finished.status);
-    try std.testing.expect(finished.duration_ms >= 0);
-
-    const done = switch (collector.events.items[2]) {
-        .message_done => |text| text,
+    try std.testing.expectEqual(@as(usize, 2), collector.events.items.len);
+    try std.testing.expectEqual(instance.Origin.model, collector.events.items[0].origin);
+    const evaluation = collector.events.items[0].payload.eval;
+    try std.testing.expectEqualStrings("call_1", evaluation.call.id);
+    try std.testing.expectEqualStrings("3", evaluation.output);
+    try std.testing.expectEqual(instance.Evaluation.Status.completed, evaluation.status);
+    try std.testing.expect(evaluation.duration != null);
+    const done = switch (collector.events.items[1].payload) {
+        .message => |part| part.done,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("All done.", done);
 
-    try std.testing.expectEqual(@as(usize, 0), session.active_calls.items.len);
-
-    const observation = session.messages.items[2].tool;
-    try std.testing.expectEqual(collector.started_at_ms, observation.timing.started_at_ms);
-    try std.testing.expectEqual(finished.duration_ms, observation.timing.duration_ms);
+    try std.testing.expectEqual(session.messages.items[1].payload.evaluation.start, evaluation.start);
+    try std.testing.expect(session.messages.items[1].payload.evaluation.duration != null);
 }
 
-test "an unknown tool reports a start and a failed finish" {
+test "a raw argument reaches the evaluator unchanged" {
     const alloc = std.testing.allocator;
     var f: Fixture = undefined;
     try f.init(alloc);
     defer f.deinit(alloc);
     const session = &f.session;
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
-    var collector = Collector.init(alloc);
-    defer collector.deinit();
 
     try f.mock.queue(alloc, &.{
         &.{
-            .{ .tool_invocation = .{ .id = "call_1", .name = "missing", .arguments = "{}" } },
+            .{ .tool_invocation = .{ .id = "call_1", .name = "eval", .arguments = "(+ 1 2)" } },
             .{ .lifecycle = .{ .id = "resp_1", .kind = .completed } },
         },
-        &.{.{ .done = "All done." }},
+        &.{.{ .done = "Done." }},
     });
 
     try session.appendMessage(alloc, "How is the weather?");
-    try session.run(std.testing.io, alloc, collector.sink());
+    try session.run(std.testing.io, alloc, null);
 
-    try std.testing.expectEqual(@as(usize, 0), evaluator.calls);
-    try std.testing.expectEqual(@as(usize, 3), collector.events.items.len);
-
-    switch (collector.events.items[0]) {
-        .tool_started => {},
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqualStrings("{}", collector.started_source);
-
-    const finished = switch (collector.events.items[1]) {
-        .tool_finished => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(instance.Tool.Status.failed, finished.status);
-    try std.testing.expectEqualStrings("Error: unknown tool missing", finished.output);
-}
-
-test "a user evaluation is recorded without a provider turn" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    var evaluator = MockEvaluator{};
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
-    try session.evaluate(std.testing.io, alloc, "(env.help)", null);
-
-    try std.testing.expectEqual(@as(usize, 1), evaluator.calls);
-    try std.testing.expectEqualStrings("(env.help)", evaluator.last_source.?);
-    try f.mock.mocks.stream.toHaveBeenCalledTimes(0);
-    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
-
-    const evaluation = session.messages.items[0].evaluation;
-    try std.testing.expectEqualStrings("eval-0", evaluation.id);
-    try std.testing.expectEqualStrings("(env.help)", evaluation.source);
-    try std.testing.expectEqual(instance.Origin.user, evaluation.origin);
-    try std.testing.expectEqualStrings("observation text", evaluation.output);
-    try std.testing.expectEqual(instance.Tool.Status.completed, evaluation.status);
-    try std.testing.expect(evaluation.timing.started_at_ms > 0);
-    try std.testing.expectEqual(@as(usize, 0), session.active_calls.items.len);
-}
-
-test "a session runs an evaluation in its own environment" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    try session.evaluate(std.testing.io, alloc, "(env.help)", null);
-
-    const evaluation = session.messages.items[0].evaluation;
-    try std.testing.expectEqualStrings("help", evaluation.output);
-    try std.testing.expectEqual(instance.Tool.Status.completed, evaluation.status);
-    try std.testing.expectEqual(@as(usize, 0), session.active_calls.items.len);
-}
-
-test "a failed user evaluation is recorded as failed" {
-    const alloc = std.testing.allocator;
-    var f: Fixture = undefined;
-    try f.init(alloc);
-    defer f.deinit(alloc);
-    const session = &f.session;
-
-    var evaluator = MockEvaluator{ .fail = true };
-    defer evaluator.deinit(alloc);
-    session.setEvaluator(evaluator.evaluator());
-
-    try session.evaluate(std.testing.io, alloc, "(env.help)", null);
-
-    const evaluation = session.messages.items[0].evaluation;
-    try std.testing.expectEqual(instance.Tool.Status.failed, evaluation.status);
-    try std.testing.expectEqualStrings("Error: Failed", evaluation.output);
+    try std.testing.expectEqual(@as(usize, 3), session.messages.items.len);
+    try std.testing.expectEqualStrings("3", session.messages.items[1].payload.evaluation.output);
 }

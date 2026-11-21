@@ -48,7 +48,7 @@ pub const Message = struct {
 };
 
 pub const Event = struct {
-    const Part = union(enum) {
+    pub const Part = union(enum) {
         delta: []const u8,
         done: []const u8,
     };
@@ -59,24 +59,29 @@ pub const Event = struct {
         eval: Evaluation,
     },
 
-    fn fromEvaluation(evaluation: *Evaluation) Event {
-        return .{ 
+    fn fromEvaluation(evaluation: Evaluation) Event {
+        return .{
             .origin = evaluation.call.origin,
-            .payload = .{ .eval = *evaluation }
+            .payload = .{ .eval = evaluation },
         };
     }
 };
 
+
 pub const Session = struct {
     pub const Id = uuid.UUID;
 
+    pub const eval_tool_name = "eval";
+
+    pub const final_answer_prompt =
+        "Please give your final answer now: wrap up and reply with text only.";
+
     pub const Listener = struct {
         ctx: *anyopaque,
-        func: *const fn (ctx: *anyopaque, seq: usize, message: Message) void,
+        func: *const fn (ctx: *anyopaque, event: Event) void,
 
-        pub fn emit(self: Listener, seq: *usize, message: Event) void {
-            seq = *seq + 1;
-            self.func(self.ctx, *seq, message);
+        pub fn send(self: Listener, event: Event) void {
+            self.func(self.ctx, event);
         }
     };
 
@@ -105,70 +110,83 @@ pub const Session = struct {
         };
     }
 
-    pub fn run(self: *Session, io: std.Io, alloc: std.mem.Allocator, sink: ?Listener) !void {
-        errdefer {
-            const now = std.Io.Clock.real.now(io);
-            for (self.evals.items) |*call| {
-                self.messages.append(alloc, .{ .origin = call.origin, .payload = .{
-                    .evaluation = Evaluation{
-                        .call = *call,
-                        .status = .canceled,
-                        .output = "",
-                        .start = now,
-                        .duration = null,
-                    },
-                } });
-            }
-            self.evals.clearAndFree(alloc);
-        }
-
-        var round: usize = 0;
-        while (round < self.max_rounds) : (round += 1) {
-            const calls = try self.turn(io, alloc, sink);
-            if (calls == 0) return;
-            io.checkCancel();
-        }
+    pub fn appendMessage(self: *Session, alloc: std.mem.Allocator, message: []const u8) !void {
+        const content = try alloc.dupe(u8, message);
+        errdefer alloc.free(content);
+        try self.messages.append(alloc, .{ .origin = .user, .payload = .{ .message = content } });
     }
 
-    fn turn(
+    pub fn turn(
         self: *Session,
         io: std.Io,
         alloc: std.mem.Allocator,
+        message: []const u8,
         sink: ?Listener,
     ) !void {
-        const eval_tool = prov.ToolSpec{ .name = "eval", .description = "Evaluate scheme inside the session environment." };
+        try self.appendMessage(alloc, message);
+        try self.run(io, alloc, sink);
+    }
+
+    pub fn run(self: *Session, io: std.Io, alloc: std.mem.Allocator, sink: ?Listener) !void {
+        var round: usize = 0;
+        while (round < self.max_rounds) : (round += 1) {
+            const calls = try self.runTurn(io, alloc, true, sink);
+            if (calls == 0) return;
+            try io.checkCancel();
+        }
+
+        try io.checkCancel();
+        try self.appendMessage(alloc, final_answer_prompt);
+        emit(sink, .{ .origin = .user, .payload = .{ .message = .{ .done = final_answer_prompt } } });
+        _ = try self.runTurn(io, alloc, false, sink);
+    }
+
+    fn runTurn(
+        self: *Session,
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        with_tools: bool,
+        sink: ?Listener,
+    ) !usize {
+        var spec_buffer: [1]ToolSpec = undefined;
+        if (with_tools) spec_buffer[0] = .{
+            .name = eval_tool_name,
+            .description = self.environment.evalDescription(),
+        };
+        const specs: []const ToolSpec = if (with_tools) &spec_buffer else &.{};
+
         var stream = try self.provider.stream(.{
             .model = self.model.id(),
             .system = self.system,
             .messages = self.messages.items,
-            .tools = &.{eval_tool},
+            .tools = specs,
             .session = self.id,
         });
         defer stream.deinit(io);
 
-        var partial_message: std.ArrayList(u8) = .empty;
-        defer partial_message.deinit(alloc);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(alloc);
 
-        var seq: usize = 0;
+        errdefer self.releaseEvals(alloc);
 
         while (try stream.next(io)) |delta| {
             switch (delta) {
                 .delta => |chunk| {
-                    try partial_message.appendSlice(alloc, chunk);
-                    sink.?.emit(self.seq, Event{});
+                    try text.appendSlice(alloc, chunk);
+                    emit(sink, .{ .origin = .model, .payload = .{ .message = .{ .delta = chunk } } });
                 },
                 // `done` is the provider's complete text for the item, so it
                 // replaces whatever the deltas accumulated before it.
                 .done => |complete| {
-                    try partial_message.appendSlice(alloc, complete);
-                    self.messages.append(Message{ .assistant = .{ .content = partial_message.toOwnedSlice(alloc) } });
-                    partial_message.clearRetainingCapacity();
+                    text.clearRetainingCapacity();
+                    try text.appendSlice(alloc, complete);
+                    try self.commitAssistant(alloc, text.items, sink);
+                    text.clearRetainingCapacity();
                 },
                 .tool_invocation => |invocation| {
                     // The invocation slices live in the stream arena, so copy
                     // everything the session keeps.
-                    const source = decodeEvalSource(alloc, alloc.dupe([]const u8, invocation.arguments));
-                    self.queueEval(try alloc.dupe(u8, invocation.id), source);
+                    try self.queueEval(alloc, invocation);
                 },
                 .tool_return => {},
                 .lifecycle => |lifecycle| switch (lifecycle.kind) {
@@ -179,36 +197,70 @@ pub const Session = struct {
             }
         }
 
-        
-        for (self.evals.popBack()) |evaluation| {
-            const result = try self.eval(io, alloc, &evaluation);
-            self.messages.append(alloc, Message{ 
-                .origin = result.origin, 
-                .payload = .{ .evaluation = result }
+        if (text.items.len > 0) {
+            try self.commitAssistant(alloc, text.items, sink);
+        }
+
+        var calls: usize = 0;
+        while (self.evals.popFront()) |call| {
+            const evaluation = try self.eval(io, alloc, call);
+            try self.messages.append(alloc, .{
+                .origin = evaluation.call.origin,
+                .payload = .{ .evaluation = evaluation },
             });
-            sink.?.emit(&seq, Event.fromEvaluation(&result));
+            emit(sink, Event.fromEvaluation(evaluation));
+            calls += 1;
+        }
+        return calls;
+    }
+
+    fn commitAssistant(
+        self: *Session,
+        alloc: std.mem.Allocator,
+        content: []const u8,
+        sink: ?Listener,
+    ) !void {
+        const owned = try alloc.dupe(u8, content);
+        errdefer alloc.free(owned);
+        try self.messages.append(alloc, .{ .origin = .model, .payload = .{ .message = owned } });
+        emit(sink, .{ .origin = .model, .payload = .{ .message = .{ .done = owned } } });
+    }
+
+    fn queueEval(self: *Session, alloc: std.mem.Allocator, invocation: prov.Tool.Invocation) !void {
+        const id = try alloc.dupe(u8, invocation.id);
+        errdefer alloc.free(id);
+        const source = try decodeEvalSource(alloc, invocation.arguments);
+        errdefer alloc.free(source);
+        try self.evals.pushBack(alloc, .{ .id = id, .source = source, .origin = .model });
+    }
+
+    fn releaseEvals(self: *Session, alloc: std.mem.Allocator) void {
+        while (self.evals.popFront()) |call| {
+            alloc.free(call.id);
+            alloc.free(call.source);
         }
     }
 
-    fn eval(
-        self: *Session,
-        io: std.Io,
-        alloc: std.mem.Allocator,
-        call: *Evaluation.Call,
-    ) !Evaluation {
-        const clock = std.Io.Clock.real;
-        const started_at: std.Io.Timestamp = clock.now(io);
+    fn eval(self: *Session, io: std.Io, alloc: std.mem.Allocator, call: Evaluation.Call) !Evaluation {
+        const started = std.Io.Clock.real.now(io);
 
-        const result = self.environment.eval(call.source, &alloc) catch std.mem.Allocator.Error.OutOfMemory;
+        const output: []const u8 = self.environment.call(alloc, call.source) catch |err| blk: {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            break :blk try std.fmt.allocPrint(alloc, "Error: {t}", .{err});
+        };
+        const status: Evaluation.Status = if (std.mem.startsWith(u8, output, "Error: "))
+            .failed
+        else
+            .completed;
 
-        const ended_at: std.Io.Timestamp = clock.now(io);
+        const ended = std.Io.Clock.real.now(io);
 
-        return Evaluation{
-            .call = *call,
-            .start = started_at,
-            .duration = started_at.durationTo(ended_at),
-            .output = result,
-            .status = .completed,
+        return .{
+            .call = call,
+            .output = output,
+            .status = status,
+            .start = started,
+            .duration = started.durationTo(ended),
         };
     }
 
@@ -233,8 +285,25 @@ pub const Session = struct {
         return alloc.dupe(u8, arguments);
     }
 
+    fn emit(sink: ?Listener, event: Event) void {
+        if (sink) |value| value.send(event);
+    }
+
     pub fn deinit(self: *Session, alloc: std.mem.Allocator) void {
-        self.environment.deinit(alloc);
-        self.messages.clearAndFree(alloc);
+        self.releaseEvals(alloc);
+        self.evals.deinit(alloc);
+        for (self.messages.items) |message| switch (message.payload) {
+            .message => |content| alloc.free(content),
+            .evaluation => |evaluation| {
+                alloc.free(evaluation.call.id);
+                alloc.free(evaluation.call.source);
+                alloc.free(evaluation.output);
+            },
+        };
+        self.messages.deinit(alloc);
+        self.environment.deinit();
+        alloc.destroy(self.environment);
     }
 };
+
+

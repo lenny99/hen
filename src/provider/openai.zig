@@ -90,17 +90,18 @@ pub const OpenAIProvider = struct {
     fn buildPayload(alloc: std.mem.Allocator, args: Provider.SessionArgs) ![]const u8 {
         var conversation = try alloc.alloc(openai.Message, args.messages.len);
         for (args.messages, 0..) |message, i| {
-            conversation[i] = switch (message) {
-                .user => |user| .{ .role = openai.Role.user, .content = user.content },
-                .assistant => |assistant| .{
-                    .role = openai.Role.assistant,
-                    .content = assistant.content,
-                    .tool_calls = if (assistant.tool_calls.len > 0) try toolCallEntries(alloc, assistant.tool_calls) else null,
+            conversation[i] = switch (message.payload) {
+                .message => |content| .{
+                    .role = if (message.origin == .user) openai.Role.user else openai.Role.assistant,
+                    .content = content,
                 },
-                .tool => |tool_| .{ .role = openai.Role.tool, .content = tool_.content, .tool_call_id = tool_.id },
-                .evaluation => |evaluation| .{
+                .evaluation => |evaluation| if (message.origin == .model) .{
+                    .role = openai.Role.tool,
+                    .content = evaluation.output,
+                    .tool_call_id = evaluation.call.id,
+                } else .{
                     .role = openai.Role.user,
-                    .content = try instance.evaluationSexp(alloc, evaluation),
+                    .content = try asMarkdown(alloc, evaluation),
                 },
             };
         }
@@ -123,16 +124,52 @@ pub const OpenAIProvider = struct {
         return payload.toOwnedSlice();
     }
 
-    /// Copy the tool descriptors of the conversation into provider shape.
-    fn toolCallEntries(alloc: std.mem.Allocator, calls: []const instance.Tool.Invocation) ![]const openai.ToolCallEntry {
-        const entries = try alloc.alloc(openai.ToolCallEntry, calls.len);
-        for (calls, 0..) |call, i| {
-            entries[i] = .{
-                .id = call.id,
-                .function = .{ .name = call.name, .arguments = call.arguments },
-            };
+    pub fn asMarkdown(alloc: std.mem.Allocator, evaluation: instance.Evaluation) ![]const u8 {
+        var output: std.Io.Writer.Allocating = .init(alloc);
+        const writer = &output.writer;
+
+        const call = evaluation.call;
+        try writer.print("<eval id='{s}' origin='{t}'>\n", .{ call.id, call.origin });
+        try writer.print("<source>\n{s}\n</source>\n", .{call.source});
+
+        {
+            try writer.print("<output start='", .{});
+            try writeTimestamp(writer, evaluation.start);
+            try writer.print("' ", .{});
+
+            try writer.print("duration='{d}s' status='{t}'>\n", .{
+                evaluation.duration.?.toSeconds(),
+                evaluation.status,
+            });
+            const out = evaluation.output;
+            if (out.len > 1000) {
+                try writer.print("<head>{s}</head>", .{out[0..1000]});
+                const count = @min(1000, out.len);
+                try writer.print("<tail>{s}</tail>", .{out[count..]});
+            } else {
+                _ = try writer.write(out);
+            }
+            try writer.print("</output>", .{});
         }
-        return entries;
+
+        return try output.toOwnedSlice();
+    }
+
+    fn writeTimestamp(w: *std.Io.Writer, ts: std.Io.Timestamp) !void {
+        const seconds: u64 = @intCast(@max(ts.toSeconds(), 0));
+        const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+        const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const day = epoch_seconds.getDaySeconds();
+
+        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day.getHoursIntoDay(),
+            day.getMinutesIntoHour(),
+            day.getSecondsIntoMinute(),
+        });
     }
 
     /// Copy the tool list of the request into provider shape.

@@ -4,6 +4,9 @@ pub const Provider = prov.Provider;
 pub const Stream = prov.Stream;
 pub const ToolSpec = prov.ToolSpec;
 pub const SystemPrompt = prov.SystemPrompt;
+pub const Delta = prov.Delta;
+pub const Tool = prov.Tool;
+pub const Lifecycle = prov.Lifecycle;
 
 const env = @import("environment.zig");
 pub const Environment = env.Environment;
@@ -18,5 +21,9 @@ const session = @import("session.zig");
 pub const Session = session.Session;
 pub const Model = session.Model;
 pub const Message = session.Message;
+pub const Origin = session.Origin;
+pub const Evaluation = session.Evaluation;
+pub const Event = session.Event;
+pub const Listener = session.Session.Listener;
 
 pub const Secret = @import("secret.zig").Secret;

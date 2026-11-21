@@ -264,18 +264,19 @@ fn buildEvalDescription(alloc: std.mem.Allocator, bundles: []const Bundle) std.m
 pub const Environment = struct {
     state: *elz.Interpreter,
     owner_thread: std.Thread.Id,
+    allocator: std.mem.Allocator,
     bundles: []Bundle = &.{},
     eval_description: []u8 = &.{},
 
     pub fn initAlloc(alloc: std.mem.Allocator, options: InitOptions) Error!*Environment {
         const environment = try alloc.create(Environment);
-        try environment.init(options);
+        try environment.init(alloc, options);
         return environment;
     }
 
     /// Initialize the engine in place. The address is stable for the whole
     /// lifetime, which is what the `*env*` host binding requires.
-    pub fn init(self: *Environment, options: InitOptions) Error!void {
+    pub fn init(self: *Environment, alloc: std.mem.Allocator, options: InitOptions) Error!void {
         const backing = std.heap.page_allocator;
         const state = try backing.create(elz.Interpreter);
         state.* = elz.Interpreter.init(.{
@@ -284,7 +285,7 @@ pub const Environment = struct {
             backing.destroy(state);
             return error.InitializationFailed;
         };
-        self.* = .{ .state = state, .owner_thread = std.Thread.getCurrentId() };
+        self.* = .{ .state = state, .owner_thread = std.Thread.getCurrentId(), .allocator = alloc };
         // bind itself to the runtime
         self.setGlobal("*env*", .{ .opaque_pointer = self }) catch {
             self.state.deinit();
@@ -293,15 +294,15 @@ pub const Environment = struct {
         };
         // initialize standard library
         if (options.use_default_bundles) {
-            try self.bindCoreTools(backing);
+            try self.bindCoreTools();
         }
     }
 
     /// Release the engine. Call this once, on the owning thread.
-    pub fn deinit(self: *Environment, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Environment) void {
         self.checkThread() catch return;
-        Bundle.freeSlice(alloc, self.bundles);
-        if (self.eval_description.len > 0) alloc.free(self.eval_description);
+        Bundle.freeSlice(self.allocator, self.bundles);
+        if (self.eval_description.len > 0) self.allocator.free(self.eval_description);
         self.state.deinit();
         std.heap.page_allocator.destroy(self.state);
         self.* = undefined;
@@ -434,16 +435,16 @@ pub const Environment = struct {
         }
     }
 
-    pub fn setBundles(self: *Environment, alloc: std.mem.Allocator, bundles: []const Bundle) std.mem.Allocator.Error!void {
-        const owned = try Bundle.adopt(alloc, bundles);
-        errdefer Bundle.freeSlice(alloc, owned);
-        const description = try buildEvalDescription(alloc, owned);
+    pub fn setBundles(self: *Environment, bundles: []const Bundle) std.mem.Allocator.Error!void {
+        const owned = try Bundle.adopt(self.allocator, bundles);
+        errdefer Bundle.freeSlice(self.allocator, owned);
+        const description = try buildEvalDescription(self.allocator, owned);
         const previous = self.bundles;
         const previous_description = self.eval_description;
         self.bundles = owned;
         self.eval_description = description;
-        Bundle.freeSlice(alloc, previous);
-        if (previous_description.len > 0) alloc.free(previous_description);
+        Bundle.freeSlice(self.allocator, previous);
+        if (previous_description.len > 0) self.allocator.free(previous_description);
     }
 
     pub fn evalDescription(self: *const Environment) []const u8 {
@@ -454,7 +455,7 @@ pub const Environment = struct {
         try self.setGlobal(name, .{ .foreign_procedure = tool.impl });
     }
 
-    pub fn bindCoreTools(self: *Environment, alloc: std.mem.Allocator) Error!void {
+    pub fn bindCoreTools(self: *Environment) Error!void {
         var name_buffer: [256]u8 = undefined;
         for (core_tools) |tool| {
             try self.bindToolAs(tool.identifier, tool);
@@ -463,16 +464,16 @@ pub const Environment = struct {
             try self.bindToolAs(dotted, tool);
         }
 
-        const bundles = try coreBundles(alloc);
-        defer Bundle.freeSlice(alloc, bundles);
-        try self.setBundles(alloc, bundles);
+        const bundles = try coreBundles(self.allocator);
+        defer Bundle.freeSlice(self.allocator, bundles);
+        try self.setBundles(bundles);
     }
 };
 
 test "call crosses a string result as raw text" {
     var env: Environment = undefined;
-    try env.init(.{});
-    defer env.deinit(std.testing.allocator);
+    try env.init(std.testing.allocator, .{});
+    defer env.deinit();
 
     const result = try env.call(std.testing.allocator, "\"hello\"");
     defer std.testing.allocator.free(result);
@@ -481,8 +482,8 @@ test "call crosses a string result as raw text" {
 
 test "call crosses other results as written text" {
     var env: Environment = undefined;
-    try env.init(.{});
-    defer env.deinit(std.testing.allocator);
+    try env.init(std.testing.allocator, .{});
+    defer env.deinit();
 
     const result = try env.call(std.testing.allocator, "(+ 1 2)");
     defer std.testing.allocator.free(result);
@@ -491,8 +492,8 @@ test "call crosses other results as written text" {
 
 test "call turns a scheme error into an observation" {
     var env: Environment = undefined;
-    try env.init(.{});
-    defer env.deinit(std.testing.allocator);
+    try env.init(std.testing.allocator, .{});
+    defer env.deinit();
 
     const result = try env.call(std.testing.allocator, "(error \"boom\")");
     defer std.testing.allocator.free(result);
@@ -501,10 +502,11 @@ test "call turns a scheme error into an observation" {
 
 test "bindToolAs exposes a namespaced tool" {
     var env: Environment = undefined;
-    try env.init(.{});
-    defer env.deinit(std.testing.allocator);
+    try env.init(std.testing.allocator, .{});
+    defer env.deinit();
 
     try env.bindToolAs("env.help", Help);
-    var output: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("\"help\"", try env.eval("(env.help)", &output));
+    const result = try env.call(std.testing.allocator, "(env.help)");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("help", result);
 }

@@ -16,6 +16,7 @@ pub fn sessionIdFromText(text: []const u8) !SessionId {
 }
 
 pub const EventKind = enum {
+    message_delta,
     assistant,
     tool,
     user,
@@ -23,12 +24,14 @@ pub const EventKind = enum {
 
     pub fn wireName(self: EventKind) []const u8 {
         return switch (self) {
+            .message_delta => "message.delta",
             .turn_finished => "turn.finished",
             else => @tagName(self),
         };
     }
 
     pub fn parse(text: []const u8) !EventKind {
+        if (std.mem.eql(u8, text, "message.delta")) return .message_delta;
         if (std.mem.eql(u8, text, "turn.finished")) return .turn_finished;
         if (std.mem.eql(u8, text, "assistant")) return .assistant;
         if (std.mem.eql(u8, text, "tool")) return .tool;

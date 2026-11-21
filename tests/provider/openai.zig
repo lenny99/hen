@@ -219,6 +219,57 @@ test "Endpoints.fromBase trims one trailing slash" {
     try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", endpoints.go);
 }
 
+test "asMarkdown renders one evaluation as xml" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    const rendered = try OpenAIProvider.asMarkdown(gpa, .{
+        .call = .{ .id = "eval-0", .source = "(+ 1 2)", .origin = .user },
+        .output = "3",
+        .status = .completed,
+        .start = .{ .nanoseconds = 1622924906 * std.time.ns_per_s },
+        .duration = .{ .nanoseconds = 2 * std.time.ns_per_s },
+    });
+
+    const expected =
+        \\<eval id='eval-0' origin='user'>
+        \\<source>
+        \\(+ 1 2)
+        \\</source>
+        \\<output start='2021-06-05T20:28:26Z' duration='2s' status='completed'>
+        \\3</output>
+    ;
+    try std.testing.expectEqualStrings(expected, rendered);
+}
+
+test "asMarkdown splits a long output into head and tail" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    const first = try gpa.alloc(u8, 1000);
+    @memset(first, 'a');
+    const last = try gpa.alloc(u8, 200);
+    @memset(last, 'b');
+    const long_output = try std.mem.concat(gpa, u8, &.{ first, last });
+
+    const rendered = try OpenAIProvider.asMarkdown(gpa, .{
+        .call = .{ .id = "eval-0", .source = "(env.help)", .origin = .user },
+        .output = long_output,
+        .status = .completed,
+        .start = .{ .nanoseconds = 0 },
+        .duration = .{ .nanoseconds = std.time.ns_per_s },
+    });
+
+    const head_marker = try std.fmt.allocPrint(gpa, "<head>{s}</head>", .{first});
+    try std.testing.expect(std.mem.indexOf(u8, rendered, head_marker) != null);
+
+    const tail_marker = try std.fmt.allocPrint(gpa, "{s}</tail></output>", .{last});
+    try std.testing.expect(std.mem.endsWith(u8, rendered, tail_marker));
+    try std.testing.expect(std.mem.indexOf(u8, rendered, long_output) == null);
+}
+
 test "provider streams the reply from the wire" {
     const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -247,7 +298,7 @@ test "provider streams the reply from the wire" {
     openai_provider.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
     var messages: std.ArrayList(instance.Message) = .empty;
-    try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .message = "Hello Agent!" } });
     const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{
@@ -307,7 +358,7 @@ test "the request carries the one action tool" {
     openai_provider.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
     var messages: std.ArrayList(instance.Message) = .empty;
-    try messages.append(gpa, .{ .user = .{ .content = "Hello Agent!" } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .message = "Hello Agent!" } });
     const tools = [_]instance.ToolSpec{.{ .name = "help", .description = "Run one Scheme expression." }};
 
     var stream = try openai_provider.asProvider().stream(.{
@@ -346,7 +397,7 @@ test "the request carries the one action tool" {
     }
 }
 
-test "the conversation mapping emits assistant tool calls and tool messages" {
+test "the conversation mapping emits tool results for model evaluations" {
     const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -374,12 +425,21 @@ test "the conversation mapping emits assistant tool calls and tool messages" {
     openai_provider.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
     var messages: std.ArrayList(instance.Message) = .empty;
-    try messages.append(gpa, .{ .user = .{ .content = "Evaluate the sum." } });
-    try messages.append(gpa, .{ .assistant = .{
-        .content = "",
-        .tool_calls = &.{.{ .id = "call_1", .name = "help", .arguments = "(+ 1 2)" }},
-    } });
-    try messages.append(gpa, .{ .tool = .{ .id = "call_1", .content = "3" } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .message = "Evaluate the sum." } });
+    try messages.append(gpa, .{ .origin = .model, .payload = .{ .evaluation = .{
+        .call = .{ .id = "call_1", .source = "(+ 1 2)", .origin = .model },
+        .output = "3",
+        .status = .completed,
+        .start = .{ .nanoseconds = 0 },
+        .duration = .{ .nanoseconds = std.time.ns_per_s },
+    } } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .evaluation = .{
+        .call = .{ .id = "eval-0", .source = "(env.help)", .origin = .user },
+        .output = "help",
+        .status = .completed,
+        .start = .{ .nanoseconds = 0 },
+        .duration = .{ .nanoseconds = std.time.ns_per_s },
+    } } });
     const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{
@@ -398,22 +458,22 @@ test "the conversation mapping emits assistant tool calls and tool messages" {
 
     try std.testing.expectEqual(@as(usize, 4), create.messages.len);
     try std.testing.expectEqual(openai.Role.system, create.messages[0].role);
-    try std.testing.expectEqual(openai.Role.user, create.messages[1].role);
 
-    const assistant = create.messages[2];
-    try std.testing.expectEqual(openai.Role.assistant, assistant.role);
-    const calls = assistant.tool_calls orelse return error.MissingToolCalls;
-    try std.testing.expectEqual(@as(usize, 1), calls.len);
-    try std.testing.expectEqualStrings("call_1", calls[0].id);
-    try std.testing.expectEqualStrings("function", calls[0].type);
-    try std.testing.expectEqualStrings("help", calls[0].function.name);
-    try std.testing.expectEqualStrings("(+ 1 2)", calls[0].function.arguments);
+    const user = create.messages[1];
+    try std.testing.expectEqual(openai.Role.user, user.role);
+    try std.testing.expectEqualStrings("Evaluate the sum.", user.content);
 
-    const tool = create.messages[3];
+    const tool = create.messages[2];
     try std.testing.expectEqual(openai.Role.tool, tool.role);
     try std.testing.expectEqualStrings("3", tool.content);
     const tool_call_id = tool.tool_call_id orelse return error.MissingToolCallId;
     try std.testing.expectEqualStrings("call_1", tool_call_id);
+
+    const evaluation = create.messages[3];
+    try std.testing.expectEqual(openai.Role.user, evaluation.role);
+    try std.testing.expect(std.mem.indexOf(u8, evaluation.content, "<eval id='eval-0' origin='user'>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, evaluation.content, "(env.help)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, evaluation.content, "\nhelp</output>") != null);
 }
 
 test "the generator assembles tool call fragments by index and ends the turn as an action round" {
@@ -451,7 +511,7 @@ test "the generator assembles tool call fragments by index and ends the turn as 
     openai_provider.endpoints.go = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{server.port()});
 
     var messages: std.ArrayList(instance.Message) = .empty;
-    try messages.append(gpa, .{ .user = .{ .content = "Evaluate the sum." } });
+    try messages.append(gpa, .{ .origin = .user, .payload = .{ .message = "Evaluate the sum." } });
     const tools: [0]instance.ToolSpec = .{};
 
     var stream = try openai_provider.asProvider().stream(.{

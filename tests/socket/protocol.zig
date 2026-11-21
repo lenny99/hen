@@ -53,6 +53,16 @@ test "server event and snapshot round trip" {
     {
         var buffer: [512]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
+        try protocol.writeServerFrame(alloc, &writer, .{ .event = .{ .seq = 9, .kind = .message_delta, .text = "hi" } });
+        var reader = std.Io.Reader.fixed(writer.buffered());
+        const back = try protocol.readServerFrame(arena.allocator(), &reader);
+        try std.testing.expectEqual(@as(u64, 9), back.event.seq);
+        try std.testing.expectEqual(protocol.EventKind.message_delta, back.event.kind);
+        try std.testing.expectEqualStrings("hi", back.event.text);
+    }
+    {
+        var buffer: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
         const messages = [_][]const u8{ "one", "two" };
         try protocol.writeServerFrame(alloc, &writer, .{ .snapshot = .{ .messages = &messages, .seq = 3 } });
         var reader = std.Io.Reader.fixed(writer.buffered());

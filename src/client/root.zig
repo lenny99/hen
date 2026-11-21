@@ -58,9 +58,11 @@ const MessageKind = enum {
 const Message = struct {
     kind: MessageKind,
     text: []u8,
+    open: bool = false,
 };
 
 const ServerKind = enum {
+    message_delta,
     assistant,
     tool,
     user,
@@ -127,6 +129,40 @@ pub const App = struct {
         try self.appendMessage(.failure, text);
     }
 
+    fn appendDelta(self: *App, text: []const u8) !void {
+        if (self.messages.items.len > 0) {
+            const last = &self.messages.items[self.messages.items.len - 1];
+            if (last.open) {
+                const grown = try self.gpa.realloc(last.text, last.text.len + text.len);
+                @memcpy(grown[last.text.len..], text);
+                last.text = grown;
+                return;
+            }
+        }
+        try self.appendMessage(.assistant, text);
+        self.messages.items[self.messages.items.len - 1].open = true;
+    }
+
+    fn finishStream(self: *App, text: []const u8) !void {
+        if (self.messages.items.len > 0) {
+            const last = &self.messages.items[self.messages.items.len - 1];
+            if (last.open) {
+                const copy = try self.gpa.dupe(u8, text);
+                self.gpa.free(last.text);
+                last.text = copy;
+                last.open = false;
+                return;
+            }
+        }
+        try self.appendMessage(.assistant, text);
+    }
+
+    fn closeStream(self: *App) void {
+        if (self.messages.items.len > 0) {
+            self.messages.items[self.messages.items.len - 1].open = false;
+        }
+    }
+
     fn submit(self: *App) !void {
         if (!self.connected or self.busy) return;
         const owned = try self.input.toOwnedSlice();
@@ -142,12 +178,21 @@ pub const App = struct {
     fn handleServer(self: *App, event: ServerEvent) !void {
         defer self.gpa.free(event.text);
         switch (event.kind) {
-            .turn_finished => self.busy = false,
+            .message_delta => try self.appendDelta(event.text),
+            .assistant => try self.finishStream(event.text),
             .failure => {
+                self.closeStream();
                 try self.appendMessage(.failure, event.text);
                 self.busy = false;
             },
-            else => if (event.text.len > 0) try self.appendMessage(messageKind(event.kind), event.text),
+            .turn_finished => {
+                self.closeStream();
+                self.busy = false;
+            },
+            else => {
+                self.closeStream();
+                if (event.text.len > 0) try self.appendMessage(messageKind(event.kind), event.text);
+            },
         }
     }
 
@@ -351,6 +396,7 @@ fn readerMain(connection: *Connection, loop: *vaxis.Loop(Event), gpa: std.mem.Al
 
 fn serverKind(kind: protocol.EventKind) ServerKind {
     return switch (kind) {
+        .message_delta => .message_delta,
         .assistant => .assistant,
         .tool => .tool,
         .user => .user,
@@ -360,6 +406,7 @@ fn serverKind(kind: protocol.EventKind) ServerKind {
 
 fn messageKind(kind: ServerKind) MessageKind {
     return switch (kind) {
+        .message_delta => .assistant,
         .assistant => .assistant,
         .tool => .tool,
         .user => .user,
@@ -367,7 +414,6 @@ fn messageKind(kind: ServerKind) MessageKind {
         .failure => .failure,
     };
 }
-
 fn messageSegments(message: Message) [3]vaxis.Cell.Segment {
     return .{
         .{ .text = prefixFor(message.kind), .style = prefixStyleFor(message.kind) },
@@ -433,6 +479,7 @@ fn scrollAfterAppend(scroll: usize) usize {
 const testing = std.testing;
 
 test "server events map to message kinds" {
+    try testing.expectEqual(MessageKind.assistant, messageKind(.message_delta));
     try testing.expectEqual(MessageKind.assistant, messageKind(.assistant));
     try testing.expectEqual(MessageKind.tool, messageKind(.tool));
     try testing.expectEqual(MessageKind.user, messageKind(.user));
@@ -441,6 +488,7 @@ test "server events map to message kinds" {
 }
 
 test "protocol events map to server kinds" {
+    try testing.expectEqual(ServerKind.message_delta, serverKind(.message_delta));
     try testing.expectEqual(ServerKind.assistant, serverKind(.assistant));
     try testing.expectEqual(ServerKind.tool, serverKind(.tool));
     try testing.expectEqual(ServerKind.user, serverKind(.user));
@@ -450,4 +498,68 @@ test "protocol events map to server kinds" {
 test "scroll follows only when already at the bottom" {
     try testing.expectEqual(@as(usize, 0), scrollAfterAppend(0));
     try testing.expectEqual(@as(usize, 4), scrollAfterAppend(3));
+}
+
+test "deltas accumulate into one open message" {
+    var app = App{
+        .gpa = testing.allocator,
+        .connection = undefined,
+        .session_id = undefined,
+        .input = vaxis.widgets.TextInput.init(testing.allocator),
+    };
+    defer {
+        for (app.messages.items) |message| testing.allocator.free(message.text);
+        app.messages.deinit(testing.allocator);
+        app.input.deinit();
+    }
+
+    try app.appendDelta("Hi");
+    try app.appendDelta(" there");
+    try testing.expectEqual(@as(usize, 1), app.messages.items.len);
+    try testing.expectEqualStrings("Hi there", app.messages.items[0].text);
+    try testing.expect(app.messages.items[0].open);
+
+    try app.finishStream("Hi there");
+    try testing.expectEqual(@as(usize, 1), app.messages.items.len);
+    try testing.expectEqualStrings("Hi there", app.messages.items[0].text);
+    try testing.expect(!app.messages.items[0].open);
+}
+
+test "a done event without deltas appends a message" {
+    var app = App{
+        .gpa = testing.allocator,
+        .connection = undefined,
+        .session_id = undefined,
+        .input = vaxis.widgets.TextInput.init(testing.allocator),
+    };
+    defer {
+        for (app.messages.items) |message| testing.allocator.free(message.text);
+        app.messages.deinit(testing.allocator);
+        app.input.deinit();
+    }
+
+    try app.finishStream("hello");
+    try testing.expectEqual(@as(usize, 1), app.messages.items.len);
+    try testing.expectEqualStrings("hello", app.messages.items[0].text);
+    try testing.expect(!app.messages.items[0].open);
+}
+
+test "another event closes the open message" {
+    var app = App{
+        .gpa = testing.allocator,
+        .connection = undefined,
+        .session_id = undefined,
+        .input = vaxis.widgets.TextInput.init(testing.allocator),
+    };
+    defer {
+        for (app.messages.items) |message| testing.allocator.free(message.text);
+        app.messages.deinit(testing.allocator);
+        app.input.deinit();
+    }
+
+    try app.appendDelta("partial");
+    app.closeStream();
+    try testing.expectEqual(@as(usize, 1), app.messages.items.len);
+    try testing.expectEqualStrings("partial", app.messages.items[0].text);
+    try testing.expect(!app.messages.items[0].open);
 }
